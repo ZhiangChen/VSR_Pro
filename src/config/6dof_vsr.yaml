@@ -1,0 +1,58 @@
+simulation_settings:
+  gravity: [0, 0, -9.81]  # Gravity vector
+  time_step: 0.01         # Time step for simulation
+  enable_gui: True        # Enable PyBullet GUI
+  use_real_time: False    # Use real-time simulation
+
+structure:
+  world_box:
+    dimensions: [50.0, 14.0, 2.0]  # Width, Length, Height
+    mass: 0.00                     # Static base (no mass)
+    inertia: [0.0, 0.0, 0.0]        # No inertia for static body
+
+  pedestal:
+    dimensions: [10.0, 10.0, 0.5]  # Width, Length, Height
+    mass: 2000.0                 # Heavy pedestal for stability
+    inertia: [1668333.33, 1668333.33, 3333333.33]  # Inertia values
+
+dynamics:
+  world_box:
+    restitution: 0.3
+    lateralFriction: 0.5
+    spinningFriction: 0.3
+    contactDamping: 100000000.0  # Increase damping
+    contactStiffness: 10000000000.0  # Increase stiffness
+  pedestal:
+    restitution: 0.3
+    lateralFriction: 0.3
+    spinningFriction: 0.1
+    contactDamping: 100000000.0  # Increase damping
+    contactStiffness: 10000000000.0  # Increase stiffness
+
+joints:
+  prismatic_x:
+    type: "prismatic"
+    axis: [1, 0, 0]   # Movement along X-axis
+    limit: [-1.0, 1.0]  # Min and max movement range
+    max_force: 5e8     # Maximum force applied
+
+  prismatic_y:
+    type: "prismatic"
+    axis: [0, 1, 0]   # Movement along Y-axis
+    limit: [-1.0, 1.0]
+    max_force: 5e8
+
+  prismatic_z:
+    type: "prismatic"
+    axis: [0, 0, 1]   # Movement along Z-axis
+    limit: [0.0, 1.0]  # Cannot go below ground
+    max_force: 5e8
+
+  spherical_joint:
+    type: "spherical"
+    axis: [0, 0, 0]   # No fixed axis
+    max_force:     # Maximum force for rotation
+
+robot_visual:
+  pedestal_color: [1, 0, 0, 1]  # Red color for the pedestal
+  world_box_color: [1, 1, 0, 1]  # Yellow color for world box
