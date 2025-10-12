@@ -22,21 +22,21 @@ VSR Pro provides a complete simulation environment for a 6-degree-of-freedom (6-
 VSR_Pro/
 ├── LICENSE                 # Apache License 2.0
 ├── README.md               # This file
-├── GUI.py                  # Main GUI 
-├── simulation_manager.py   # Core simulation 
-├── trajectory_generator.py # Trajectory generation
-├── data_logger.py          # Data logging
+├── GUI.py                  # Main GUI application
+├── simulation_core.py      # Core simulation engine
 ├── config.yaml             # Simulation configuration
+├── data/                   # Data storage directory
+├── docs/                   # Documentation files
 └── .gitignore              # Git ignore file
 ```
 
 ### File Descriptions
 
 - **`GUI.py`**: Main application entry point containing the PyQt5 GUI implementation with real-time controls, object loading dialogs, and visualization interface
-- **`simulation_manager.py`**: Core simulation engine that manages PyBullet physics, robot creation, joint control, and object spawning
-- **`trajectory_generator.py`**: Generates motion trajectories for the 6-DOF system with customizable parameters for each degree of freedom
-- **`data_logger.py`**: Handles logging of simulation data to CSV files for analysis and post-processing
+- **`simulation_core.py`**: Core simulation engine that manages PyBullet physics, robot creation, joint control, and object spawning
 - **`config.yaml`**: Configuration file defining simulation settings, structural parameters, dynamics properties, and visual appearance
+- **`data/`**: Directory for storing simulation data and logs
+- **`docs/`**: Documentation and additional reference materials
 
 ## Installation & Setup
 
@@ -132,17 +132,15 @@ joints:
 The system follows a modular architecture:
 
 1. **GUI Layer** (`GUI.py`): User interface and interaction handling
-2. **Simulation Layer** (`simulation_manager.py`): Physics simulation and robot control
-3. **Trajectory Layer** (`trajectory_generator.py`): Motion planning and trajectory generation
-4. **Data Layer** (`data_logger.py`): Data persistence and logging
-5. **Configuration Layer** (`config.yaml`): Parameter management
+2. **Simulation Layer** (`simulation_core.py`): Physics simulation and robot control
+3. **Configuration Layer** (`config.yaml`): Parameter management
 
 ### Extending the System
 
-- **New Trajectory Types**: Extend `TrajectoryGenerator` class with custom motion patterns
-- **Additional Sensors**: Add sensor simulation in `SimulationManager`
+- **New Trajectory Types**: Extend trajectory functionality within `SimulationCore` class with custom motion patterns
+- **Additional Sensors**: Add sensor simulation in `SimulationCore`
 - **Custom Objects**: Implement new object types with specific physics properties
-- **Analysis Tools**: Extend `DataLogger` for specialized data analysis
+- **Analysis Tools**: Extend data analysis capabilities for specialized analysis
 
 
 ## License

@@ -1,14 +1,12 @@
-# simulation_manager.py
+# simulation_core.py
 
 import yaml
 import pybullet as p
 import pybullet_data
 import time
+import math
 
-# Import the new TrajectoryGenerator with separate DOF amplitudes/frequencies
-from trajectory_generator import TrajectoryGenerator
-
-class SimulationManager:
+class SimulationCore:
     def __init__(self, yaml_path="config.yaml"):
         """Initialize simulation from YAML configuration."""
         with open(yaml_path, "r") as file:
@@ -16,11 +14,12 @@ class SimulationManager:
 
         # Extract Simulation Settings
         self.gravity = tuple(self.config["simulation_settings"]["gravity"])
-        self.time_step = self.config["simulation_settings"]["time_step"]
+        self.simulation_frequency = self.config["simulation_settings"]["simulation_frequency"]
+        self.time_step = 1.0 / self.simulation_frequency
         self.enable_graphics = self.config["simulation_settings"]["enable_graphics"]
         self.use_real_time = self.config["simulation_settings"]["use_real_time"]
 
-        if p.isConnected():
+        if p.isConnected():  # If already connected, disconnect first
             p.disconnect()
 
         self.client_id = p.connect(p.GUI if self.enable_graphics else p.DIRECT)
@@ -31,12 +30,6 @@ class SimulationManager:
         p.setGravity(*self.gravity, self.client_id)
         p.setRealTimeSimulation(1 if self.use_real_time else 0)
 
-        # Increase solver accuracy
-        p.setPhysicsEngineParameter(
-            numSolverIterations=2000,
-            numSubSteps=20,
-            physicsClientId=self.client_id
-        )
 
         # Load structure config
         self.world_box_config = self.config["structure"]["world_box"]
@@ -52,7 +45,7 @@ class SimulationManager:
 
         # Load the plane
         plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
-        print(f"✅ Plane loaded with ID: {plane_id}")
+        print(f"Plane loaded with ID: {plane_id}")
 
         # 1) World box
         world_box_half_extents = [dim / 2 for dim in self.world_box_config["dimensions"]]
@@ -70,18 +63,23 @@ class SimulationManager:
         )
         pedestal_gap = 0.0
 
-        pedestal_position = [0,0,0.5]
+        link3_position_z = self.pedestal_config["absolute_height"] - world_box_half_extents[2]
+        # check if link3_position_z is valid, if not, raise an error
+        if link3_position_z < pedestal_half_extents[2]:
+            raise ValueError("Pedestal position is too low and would intersect with the world box.")
 
         num_links = 4
         link_masses = [0.0, 0.0, 0.0, self.pedestal_config["mass"]]
         link_collision_shapes = [-1, -1, -1, pedestal_collision_shape]
         link_visual_shapes    = [-1, -1, -1, pedestal_visual_shape]
+
         link_positions = [
-            [0, 0, world_box_half_extents[2]],
-            [0, 0, 0.2],
-            [0, 0, 0.3],
-            pedestal_position
+            [0, 0, 0],  
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, link3_position_z]
         ]
+
         link_orientations = [[0, 0, 0, 1]] * num_links
         link_inertial_positions    = [[0, 0, 0]] * num_links
         link_inertial_orientations = [[0, 0, 0, 1]] * num_links
@@ -114,7 +112,7 @@ class SimulationManager:
         if self.robot_id < 0:
             raise RuntimeError("Failed to create robot!")
 
-        print(f"✅ Robot created with ID: {self.robot_id}")
+        print(f"Robot created with ID: {self.robot_id}")
 
         # Enable collisions
         p.setCollisionFilterPair(self.robot_id, self.robot_id, -1, 3, enableCollision=1)
@@ -127,10 +125,10 @@ class SimulationManager:
         )
 
         # Apply custom dynamics from YAML
-        self.apply_dynamics()
-        print("🚀 Pedestal and dynamics applied.")
+        self.apply_dynamic_physics_properties()
+        print("Pedestal and dynamics applied.")
 
-    def apply_dynamics(self):
+    def apply_dynamic_physics_properties(self):
         print("Applying Dynamics Properties...")
         # World Box
         p.changeDynamics(
@@ -143,7 +141,7 @@ class SimulationManager:
             contactStiffness=self.dynamics_config["world_box"]["contactStiffness"],
             physicsClientId=self.client_id
         )
-        print(f"✅ World Box Dynamics: {p.getDynamicsInfo(self.robot_id, -1)}")
+        print(f"World Box Dynamics: {p.getDynamicsInfo(self.robot_id, -1)}")
 
         # Pedestal links
         for i in range(4):
@@ -158,71 +156,48 @@ class SimulationManager:
                 localInertiaDiagonal=self.pedestal_config["inertia"],
                 physicsClientId=self.client_id
             )
-            print(f"✅ Pedestal Link {i} Dynamics: {p.getDynamicsInfo(self.robot_id, i)}")
+            print(f"Pedestal Link {i} Dynamics: {p.getDynamicsInfo(self.robot_id, i)}")
 
-    def execute_trajectory(self, trajectory_params, real_time: bool = False):
-        """Executes a trajectory using the new 6-DOF amplitude/frequency parameters."""
-        if self.robot_id is None:
-            print("Error: Robot has not been created yet.")
-            return
+    def execute_trajectory_tick(self, params, t: float, dt: float, real_time: bool = False):
+        """
+        Apply one incremental trajectory command at time t using JOINT CONTROL,
+        consistent with execute_trajectory(): joints 0-2 are prismatic (x,y,z),
+        joint 3 is spherical (roll, pitch, yaw via quaternion).
+        This MUST NOT call stepSimulation() or sleep; the GUI (QTimer) advances the world.
+        """
+        # Read params
+        amp_x = params.get("amp_x", 0.0);     freq_x = params.get("freq_x", 0.0)
+        amp_y = params.get("amp_y", 0.0);     freq_y = params.get("freq_y", 0.0)
+        amp_z = params.get("amp_z", 0.0);     freq_z = params.get("freq_z", 0.0)
+        amp_roll  = params.get("amp_roll", 0.0);  freq_roll  = params.get("freq_roll", 0.0)
+        amp_pitch = params.get("amp_pitch", 0.0); freq_pitch = params.get("freq_pitch", 0.0)
+        amp_yaw   = params.get("amp_yaw", 0.0);   freq_yaw   = params.get("freq_yaw", 0.0)
 
-        print(f"Executing trajectory with parameters:\n{trajectory_params}")
+        # Desired joint positions at time t
+        x = amp_x * math.sin(2 * math.pi * freq_x * t)
+        y = amp_y * math.sin(2 * math.pi * freq_y * t)
+        z = amp_z * math.sin(2 * math.pi * freq_z * t)
+        roll  = amp_roll  * math.sin(2 * math.pi * freq_roll  * t)
+        pitch = amp_pitch * math.sin(2 * math.pi * freq_pitch * t)
+        yaw   = amp_yaw   * math.sin(2 * math.pi * freq_yaw   * t)
 
-        # Create the generator with the new separate parameters
-        generator = TrajectoryGenerator(
-            duration=trajectory_params["duration"],
-            timestep=trajectory_params["timestep"],
+        try:
+            # Prismatic joints (indices 0,1,2): X, Y, Z
+            p.setJointMotorControl2(self.robot_id, 0, p.POSITION_CONTROL,
+                                    targetPosition=float(x), physicsClientId=self.client_id)
+            p.setJointMotorControl2(self.robot_id, 1, p.POSITION_CONTROL,
+                                    targetPosition=float(y), physicsClientId=self.client_id)
+            p.setJointMotorControl2(self.robot_id, 2, p.POSITION_CONTROL,
+                                    targetPosition=float(z), physicsClientId=self.client_id)
 
-            amp_x=trajectory_params["amp_x"],
-            amp_y=trajectory_params["amp_y"],
-            amp_z=trajectory_params["amp_z"],
-            amp_roll=trajectory_params["amp_roll"],
-            amp_pitch=trajectory_params["amp_pitch"],
-            amp_yaw=trajectory_params["amp_yaw"],
+            # Spherical joint (index 3): orientation from Euler -> quaternion
+            target_orientation = p.getQuaternionFromEuler([roll, pitch, yaw])
+            p.setJointMotorControlMultiDof(self.robot_id, 3, p.POSITION_CONTROL,
+                                           targetPosition=target_orientation,
+                                           physicsClientId=self.client_id)
+        except Exception as e:
+            print(f"[SimulationCore.execute_trajectory_tick] error: {e}")
 
-            freq_x=trajectory_params["freq_x"],
-            freq_y=trajectory_params["freq_y"],
-            freq_z=trajectory_params["freq_z"],
-            freq_roll=trajectory_params["freq_roll"],
-            freq_pitch=trajectory_params["freq_pitch"],
-            freq_yaw=trajectory_params["freq_yaw"],
-        )
-
-        if real_time:
-            # Real-time trajectory
-            for joint_pos, joint_vel, t in generator.generate_trajectory_realtime():
-                # prismatic joints => indices 0,1,2
-                p.setJointMotorControl2(self.robot_id, 0, p.POSITION_CONTROL, targetPosition=joint_pos[0])
-                p.setJointMotorControl2(self.robot_id, 1, p.POSITION_CONTROL, targetPosition=joint_pos[1])
-                p.setJointMotorControl2(self.robot_id, 2, p.POSITION_CONTROL, targetPosition=joint_pos[2])
-
-                # spherical => index 3
-                target_orientation = p.getQuaternionFromEuler(joint_pos[3:6])
-                p.setJointMotorControlMultiDof(self.robot_id, 3, p.POSITION_CONTROL, 
-                                               targetPosition=target_orientation)
-                p.stepSimulation()
-        else:
-            # Offline / faster than real-time
-            offline_speed_factor = 0.5
-            print("Executing trajectory offline... Waiting 2 seconds before starting...")
-            time.sleep(2)
-
-            joint_positions, joint_velocities, timestamps = generator.generate_trajectory_offline()
-            for i in range(len(timestamps)):
-                # prismatic
-                p.setJointMotorControl2(self.robot_id, 0, p.POSITION_CONTROL, targetPosition=joint_positions[i][0])
-                p.setJointMotorControl2(self.robot_id, 1, p.POSITION_CONTROL, targetPosition=joint_positions[i][1])
-                p.setJointMotorControl2(self.robot_id, 2, p.POSITION_CONTROL, targetPosition=joint_positions[i][2])
-
-                # spherical
-                target_orientation = p.getQuaternionFromEuler(joint_positions[i][3:6])
-                p.setJointMotorControlMultiDof(self.robot_id, 3, p.POSITION_CONTROL, 
-                                               targetPosition=target_orientation)
-                p.stepSimulation()
-
-                time.sleep(trajectory_params["timestep"] * offline_speed_factor)
-
-        print("Trajectory execution complete.")
 
     def spawn_obj_on_pedestal(
         self,

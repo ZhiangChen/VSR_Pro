@@ -3,6 +3,7 @@ import sys
 import time
 import math
 import threading
+import yaml
 
 import pybullet as p
 
@@ -11,9 +12,9 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QCheckBox, QFileDialog, QDialog, QGroupBox,
     QPushButton
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
-from simulation_manager import SimulationManager
+from simulation_core import SimulationCore
 
 ###############################################################################
 # Enhanced Dialog for PBR/Collision + Live Preview
@@ -28,10 +29,10 @@ class EnhancedPBRLoadDialog(QDialog):
       - Confirm: finalize (keep the object)
       - Cancel: remove the object
     """
-    def __init__(self, obj_path, simulation_manager, parent=None):
+    def __init__(self, obj_path, simulation_core, parent=None):
         super().__init__(parent)
         self.obj_path = obj_path
-        self.sim_manager = simulation_manager
+        self.sim_core = simulation_core
 
         self.setWindowTitle("Spawn OBJ with PBR & Collision - Live Preview")
 
@@ -54,37 +55,37 @@ class EnhancedPBRLoadDialog(QDialog):
         # ---------------------------------------------------------------------
         # 1) Position & Orientation
         # ---------------------------------------------------------------------
-        pos_group = QGroupBox("Position & Orientation")
-        pos_layout = QHBoxLayout()
+        pose_group = QGroupBox("Position & Orientation")
+        pose_layout = QHBoxLayout()
 
         # Position
-        pos_layout.addWidget(QLabel("X:"))
+        pose_layout.addWidget(QLabel("X:"))
         self.x_input = QLineEdit(str(self.default_x))
-        pos_layout.addWidget(self.x_input)
+        pose_layout.addWidget(self.x_input)
 
-        pos_layout.addWidget(QLabel("Y:"))
+        pose_layout.addWidget(QLabel("Y:"))
         self.y_input = QLineEdit(str(self.default_y))
-        pos_layout.addWidget(self.y_input)
+        pose_layout.addWidget(self.y_input)
 
-        pos_layout.addWidget(QLabel("Z:"))
+        pose_layout.addWidget(QLabel("Z:"))
         self.z_input = QLineEdit(str(self.default_z))
-        pos_layout.addWidget(self.z_input)
+        pose_layout.addWidget(self.z_input)
 
         # Orientation (deg)
-        pos_layout.addWidget(QLabel("Roll(deg):"))
+        pose_layout.addWidget(QLabel("Roll(deg):"))
         self.roll_input = QLineEdit(str(math.degrees(self.default_roll)))
-        pos_layout.addWidget(self.roll_input)
+        pose_layout.addWidget(self.roll_input)
 
-        pos_layout.addWidget(QLabel("Pitch(deg):"))
+        pose_layout.addWidget(QLabel("Pitch(deg):"))
         self.pitch_input = QLineEdit(str(math.degrees(self.default_pitch)))
-        pos_layout.addWidget(self.pitch_input)
+        pose_layout.addWidget(self.pitch_input)
 
-        pos_layout.addWidget(QLabel("Yaw(deg):"))
+        pose_layout.addWidget(QLabel("Yaw(deg):"))
         self.yaw_input = QLineEdit(str(math.degrees(self.default_yaw)))
-        pos_layout.addWidget(self.yaw_input)
+        pose_layout.addWidget(self.yaw_input)
 
-        pos_group.setLayout(pos_layout)
-        main_layout.addWidget(pos_group)
+        pose_group.setLayout(pose_layout)
+        main_layout.addWidget(pose_group)
 
         # ---------------------------------------------------------------------
         # 2) Collision & PBR Properties
@@ -222,7 +223,7 @@ class EnhancedPBRLoadDialog(QDialog):
 
         # If we haven't spawned it yet, do so; otherwise update
         if self.preview_obj_id is None:
-            self.preview_obj_id = self.sim_manager.spawn_obj_on_pedestal(
+            self.preview_obj_id = self.sim_core.spawn_obj_on_pedestal(
                 obj_path=self.obj_path,
                 mesh_scale=[1,1,1],
                 offset=offset,
@@ -233,7 +234,7 @@ class EnhancedPBRLoadDialog(QDialog):
         else:
             # Already spawned => update transform & dynamics
             # 1) compute final position based on pedestal
-            pedestal_state = p.getLinkState(self.sim_manager.robot_id, 3)
+            pedestal_state = p.getLinkState(self.sim_core.robot_id, 3, physicsClientId=self.sim_core.client_id)
             ped_pos = pedestal_state[0]
             final_pos = [
                 ped_pos[0] + offset[0],
@@ -245,7 +246,8 @@ class EnhancedPBRLoadDialog(QDialog):
             p.resetBasePositionAndOrientation(
                 self.preview_obj_id,
                 final_pos,
-                final_orn
+                final_orn,
+                physicsClientId=self.sim_core.client_id
             )
             # 2) reapply friction, restitution, etc. 
             # (PyBullet can't change mass after creation)
@@ -257,7 +259,7 @@ class EnhancedPBRLoadDialog(QDialog):
                 spinningFriction=pbr_props.get("spinningFriction", 0.0),
                 contactDamping=pbr_props.get("contactDamping", 0.0),
                 contactStiffness=pbr_props.get("contactStiffness", 1e5),
-                physicsClientId=self.sim_manager.client_id
+                physicsClientId=self.sim_core.client_id
             )
             print(f"[Apply] Updated object ID={self.preview_obj_id} to new transform & properties")
 
@@ -282,11 +284,18 @@ class EnhancedPBRLoadDialog(QDialog):
 class PyBulletGUI(QWidget):
     def __init__(self):
         super().__init__()
-        self.simulation_manager = None
+        self.simulation_core = None
         self.simulation_thread = None
         self.running = False
         self.trajectory_running = False
         self.trajectory_thread = None
+
+        # load config
+        yaml_path = "config.yaml"
+        with open(yaml_path, "r") as file:
+            self.config = yaml.safe_load(file)
+
+        self.simulation_frequency = self.config["simulation_settings"].get("simulation_frequency", 240)
 
         # default trajectory params
         self.trajectory_params = {
@@ -301,10 +310,17 @@ class PyBulletGUI(QWidget):
         }
 
         self.param_inputs = {}
+
+        # Simulation ticking via QTimer (avoid threading segfaults on macOS GUI)
+        self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.timeout.connect(self.on_tick)
+        self.tick_hz =  self.simulation_frequency  # Hz
+        self._tick_counter = 0
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("PyBullet with Live Preview, Collision, and PBR")
+        self.setWindowTitle("VSR Pro")
         self.setGeometry(100, 100, 650, 550)
 
         main_layout = QVBoxLayout(self)
@@ -432,19 +448,51 @@ class PyBulletGUI(QWidget):
     # Position Monitor
     ###########################################################################
     def start_position_monitor(self):
-        def update_position():
-            while True:
-                if self.simulation_manager and self.simulation_manager.robot_id is not None:
-                    try:
-                        link_state = p.getLinkState(self.simulation_manager.robot_id, 3)
-                        if link_state:
-                            pos = link_state[0]
-                            self.position_label.setText(f"Pedestal Position: {pos}")
-                    except p.error:
-                        pass
-                time.sleep(0.5)
+        """Position updates are handled inside on_tick via QTimer."""
+        pass
 
-        threading.Thread(target=update_position, daemon=True).start()
+    def on_tick(self):
+        """Main simulation tick on the Qt main thread. on_tick is active when 
+        the simulation is running, and it steps the physics simulation, updates
+        the trajectory if active, and refreshes the pedestal position label at
+        a reduced rate to avoid UI lag.
+        """
+        if not self.simulation_core or self.simulation_core.robot_id is None:
+            return
+        try:
+            # Step physics on the correct client; running on main thread prevents GUI/Metal crashes
+            p.stepSimulation(physicsClientId=self.simulation_core.client_id)
+        except Exception as e:
+            print(f"[on_tick] stepSimulation error: {e}")
+            return
+        
+        # Drive trajectory (main-thread) to avoid threading crashes on macOS
+        if getattr(self, "trajectory_running", False):
+            try:
+                self.simulation_core.execute_trajectory_tick(
+                    self.trajectory_params,
+                    t=getattr(self, "_traj_t", 0.0),
+                    dt=getattr(self, "_traj_dt", 0.01),
+                    real_time=getattr(self, "_traj_realtime", False),
+                )
+                # Advance local trajectory time
+                self._traj_t = getattr(self, "_traj_t", 0.0) + getattr(self, "_traj_dt", 0.01)
+                if self._traj_t >= getattr(self, "_traj_duration", 20.0):
+                    self.stop_trajectory()
+            except Exception as e:
+                print(f"[on_tick] trajectory tick error: {e}")
+
+        # Update pedestal position label at a reduced rate
+        try:
+            if (self._tick_counter % 24) == 0:  # ~10 Hz if tick_hz=240
+                link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
+                if link_state:
+                    pos = link_state[0]
+                    self.position_label.setText(f"Pedestal Position: {pos}")
+        except Exception:
+            pass
+        finally:
+            self._tick_counter += 1
 
     ###########################################################################
     # Simulation
@@ -456,49 +504,50 @@ class PyBulletGUI(QWidget):
             self.stop_simulation()
 
     def start_simulation(self):
-        if self.simulation_manager is None:
-            self.simulation_manager = SimulationManager("config.yaml")
-            self.simulation_manager.create_robot()
+        if self.simulation_core is None:
+            self.simulation_core = SimulationCore("config.yaml")
+            self.simulation_core.create_robot()
 
-        if self.simulation_manager.robot_id is None:
+        if self.simulation_core.robot_id is None:
             print("Error: Failed to create robot.")
             return
 
         self.running = True
         self.start_button.setText("Stop Simulation")
 
-        self.simulation_thread = threading.Thread(target=self.run_simulation, daemon=True)
-        self.simulation_thread.start()
+        # Start Qt timer
+        interval_ms = int(1000 / self.tick_hz)
+        self.timer.start(interval_ms)
 
     def stop_simulation(self):
         self.running = False
         self.start_button.setText("Start Simulation")
+        if self.timer.isActive():
+            self.timer.stop()
 
     def run_simulation(self):
-        while self.running:
-            if self.simulation_manager:
-                p.stepSimulation()
-            time.sleep(0.01)
+        """Unused: simulation is advanced by on_tick() via QTimer on the main thread."""
+        pass
 
     def reset_simulation(self):
-    
         """Resets PyBullet simulation and re-applies all settings."""
-        if self.simulation_manager:
-            # Stop the running simulation loop
+        if self.simulation_core:
+            # Stop ticking during reset
+            if self.timer.isActive():
+                self.timer.stop()
             self.running = False
-            # Reset everything
-            p.resetSimulation()
+            self.start_button.setText("Start Simulation")
+
+            # Reset everything on the correct client
+            p.resetSimulation(physicsClientId=self.simulation_core.client_id)
 
             # Re-apply physics settings
-            p.setTimeStep(self.simulation_manager.time_step, self.simulation_manager.client_id)
-            p.setGravity(*self.simulation_manager.gravity, self.simulation_manager.client_id)
-            p.setRealTimeSimulation(1 if self.simulation_manager.use_real_time else 0)
+            p.setTimeStep(self.simulation_core.time_step, self.simulation_core.client_id)
+            p.setGravity(*self.simulation_core.gravity, physicsClientId=self.simulation_core.client_id)
+            p.setRealTimeSimulation(0, physicsClientId=self.simulation_core.client_id)
 
             # Re-create your robot (and environment if needed)
-            self.simulation_manager.create_robot()
-
-            # Restart the simulation loop
-            self.start_simulation()
+            self.simulation_core.create_robot()
 
 
     ###########################################################################
@@ -511,28 +560,36 @@ class PyBulletGUI(QWidget):
             self.stop_trajectory()
 
     def start_trajectory(self):
-        if not self.simulation_manager or not self.simulation_manager.robot_id:
+        if not self.simulation_core or not self.simulation_core.robot_id:
             print("Error: Simulation not running.")
             return
 
         self.update_trajectory_params()
         self.trajectory_running = True
         self.trajectory_button.setText("Stop Trajectory")
-        self.trajectory_thread = threading.Thread(target=self.run_trajectory, daemon=True)
-        self.trajectory_thread.start()
+
+        # Per-trajectory state used by on_tick()
+        self._traj_t = 0.0
+        try:
+            self._traj_dt = float(self.trajectory_params.get("timestep", 0.01))
+        except Exception:
+            self._traj_dt = 0.01
+        self._traj_duration = float(self.trajectory_params.get("duration", 20.0))
+        self._traj_realtime = bool(self.realtime_checkbox.isChecked())
 
     def stop_trajectory(self):
         self.trajectory_running = False
         self.trajectory_button.setText("Execute Trajectory")
 
     def run_trajectory(self):
-        if not self.simulation_manager or not self.simulation_manager.robot_id:
-            print("Error: SimulationManager is not initialized.")
+        if not self.simulation_core or not self.simulation_core.robot_id:
+            print("Error: SimulationCore is not initialized.")
             return
 
         real_time = self.realtime_checkbox.isChecked()
         print(f"Executing trajectory in {'real-time' if real_time else 'offline'} mode.")
-        self.simulation_manager.execute_trajectory(self.trajectory_params, real_time=real_time)
+        # Note: Trajectory execution is now handled by execute_trajectory_tick in on_tick()
+        # This method is kept for compatibility but actual execution happens via QTimer
 
         self.trajectory_running = False
         self.trajectory_button.setText("Execute Trajectory")
@@ -548,14 +605,14 @@ class PyBulletGUI(QWidget):
     # Upload OBJ with Live Preview
     ###########################################################################
     def upload_obj(self):
-        if not self.simulation_manager or self.simulation_manager.robot_id is None:
+        if not self.simulation_core or self.simulation_core.robot_id is None:
             print("Error: Simulation must be running to upload an OBJ.")
             return
 
         obj_path, _ = QFileDialog.getOpenFileName(self, "Select OBJ File", "", "OBJ Files (*.obj)")
         if obj_path:
             print(f"Selected OBJ file: {obj_path}")
-            dialog = EnhancedPBRLoadDialog(obj_path, self.simulation_manager, parent=self)
+            dialog = EnhancedPBRLoadDialog(obj_path, self.simulation_core, parent=self)
             result = dialog.exec_()
 
             if result == QDialog.Accepted:
