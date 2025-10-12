@@ -1,7 +1,7 @@
 simulation_settings:
   gravity: [0, 0, -9.81]  # Gravity vector
   time_step: 0.01         # Time step for simulation
-  enable_gui: True        # Enable PyBullet GUI
+  enable_graphics: True        # Enable PyBullet GUI
   use_real_time: False    # Use real-time simulation
 
 structure:

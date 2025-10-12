@@ -457,7 +457,7 @@ class PyBulletGUI(QWidget):
 
     def start_simulation(self):
         if self.simulation_manager is None:
-            self.simulation_manager = SimulationManager("config/6dof_vsr.yaml")
+            self.simulation_manager = SimulationManager("config.yaml")
             self.simulation_manager.create_robot()
 
         if self.simulation_manager.robot_id is None:

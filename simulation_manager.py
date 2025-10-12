@@ -9,7 +9,7 @@ import time
 from trajectory_generator import TrajectoryGenerator
 
 class SimulationManager:
-    def __init__(self, yaml_path="config/6dof_vsr.yaml"):
+    def __init__(self, yaml_path="config.yaml"):
         """Initialize simulation from YAML configuration."""
         with open(yaml_path, "r") as file:
             self.config = yaml.safe_load(file)
@@ -17,13 +17,13 @@ class SimulationManager:
         # Extract Simulation Settings
         self.gravity = tuple(self.config["simulation_settings"]["gravity"])
         self.time_step = self.config["simulation_settings"]["time_step"]
-        self.use_gui = self.config["simulation_settings"]["enable_gui"]
+        self.enable_graphics = self.config["simulation_settings"]["enable_graphics"]
         self.use_real_time = self.config["simulation_settings"]["use_real_time"]
 
         if p.isConnected():
             p.disconnect()
 
-        self.client_id = p.connect(p.GUI if self.use_gui else p.DIRECT)
+        self.client_id = p.connect(p.GUI if self.enable_graphics else p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
 
         # Set physics
