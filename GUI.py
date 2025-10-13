@@ -10,7 +10,7 @@ import pybullet as p
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QCheckBox, QFileDialog, QDialog, QGroupBox,
-    QPushButton
+    QPushButton, QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer
 
@@ -287,6 +287,7 @@ class PyBulletGUI(QWidget):
         self.simulation_core = None
         self.simulation_thread = None
         self.running = False
+        self.paused = False  # New state for pause functionality
         self.trajectory_running = False
         self.trajectory_thread = None
 
@@ -295,21 +296,27 @@ class PyBulletGUI(QWidget):
         with open(yaml_path, "r") as file:
             self.config = yaml.safe_load(file)
 
-        self.simulation_frequency = self.config["simulation_settings"].get("simulation_frequency", 240)
+        self.use_real_time = self.config["simulation_settings"]["use_real_time"]
+
+        self.simulation_frequency = self.config["simulation_settings"].get("simulation_frequency", 500)
+        self.simulation_dt = 1.0 / self.simulation_frequency
+
+        self.GUI_update_hz = 10  # GUI update frequency in Hz
 
         # default trajectory params
         self.trajectory_params = {
-            "duration": 20.0,
-            "timestep": 0.01,
-            "amp_x": 0.5,   "freq_x": 0.5,
-            "amp_y": 0.5,   "freq_y": 0.5,
-            "amp_z": 0.5,   "freq_z": 0.5,
-            "amp_roll": 0.1,"freq_roll": 0.5,
-            "amp_pitch":0.1,"freq_pitch":0.5,
-            "amp_yaw": 0.1, "freq_yaw": 0.5
+            "cycle_number": 1,  # Number of oscillation cycles
+            "amp_x": 0.0,   "freq_x": 0.0,
+            "amp_y": 0.0,   "freq_y": 0.0,
+            "amp_z": 0.0,   "freq_z": 0.0,
+            "amp_roll": 0.0,"freq_roll": 0.0,
+            "amp_pitch":0.0,"freq_pitch":0.0,
+            "amp_yaw": 0.0, "freq_yaw": 0.0
         }
 
         self.param_inputs = {}
+        self.pgv_labels = {}  # PGV display labels
+        self.pga_labels = {}  # PGA display labels
 
         # Simulation ticking via QTimer (avoid threading segfaults on macOS GUI)
         self.timer = QTimer(self)
@@ -329,20 +336,35 @@ class PyBulletGUI(QWidget):
         sim_group = QGroupBox("Simulation Controls")
         sim_layout = QVBoxLayout()
 
+        # Button row layout: Start | Stop | Pause | Reset
+        button_layout = QHBoxLayout()
+        
         self.start_button = QPushButton("Start Simulation")
-        self.start_button.clicked.connect(self.toggle_simulation)
-        sim_layout.addWidget(self.start_button)
-
-        self.realtime_checkbox = QCheckBox("Real-Time Trajectory")
-        self.realtime_checkbox.setChecked(False)
-        sim_layout.addWidget(self.realtime_checkbox)
+        self.start_button.clicked.connect(self.start_simulation)
+        button_layout.addWidget(self.start_button)
+        
+        self.stop_button = QPushButton("Stop Simulation")
+        self.stop_button.clicked.connect(self.stop_simulation)
+        self.stop_button.setEnabled(False)  # Initially disabled
+        button_layout.addWidget(self.stop_button)
+        
+        self.pause_button = QPushButton("Pause Simulation")
+        self.pause_button.clicked.connect(self.toggle_pause_simulation)
+        self.pause_button.setEnabled(False)  # Initially disabled
+        button_layout.addWidget(self.pause_button)
 
         self.reset_button = QPushButton("Reset Simulation")
         self.reset_button.clicked.connect(self.reset_simulation)
-        sim_layout.addWidget(self.reset_button)
+        self.reset_button.setEnabled(False)  # Initially disabled until simulation is created
+        button_layout.addWidget(self.reset_button)
+        
+        sim_layout.addLayout(button_layout)
 
         self.position_label = QLabel("Pedestal Position: (0.0, 0.0, 0.0)")
         sim_layout.addWidget(self.position_label)
+        
+        self.orientation_label = QLabel("Pedestal Orientation: Roll=0.0°, Pitch=0.0°, Yaw=0.0°")
+        sim_layout.addWidget(self.orientation_label)
 
         sim_group.setLayout(sim_layout)
         main_layout.addWidget(sim_group)
@@ -351,74 +373,134 @@ class PyBulletGUI(QWidget):
         traj_group = QGroupBox("Trajectory Settings")
         traj_layout = QVBoxLayout()
 
-        dt_layout = QHBoxLayout()
-        dt_layout.addWidget(QLabel("Duration (s):"))
-        self.param_inputs["duration"] = QLineEdit(str(self.trajectory_params["duration"]))
-        dt_layout.addWidget(self.param_inputs["duration"])
-
-        dt_layout.addWidget(QLabel("Timestep (s):"))
-        self.param_inputs["timestep"] = QLineEdit(str(self.trajectory_params["timestep"]))
-        dt_layout.addWidget(self.param_inputs["timestep"])
-        traj_layout.addLayout(dt_layout)
+        # Cycle Number input
+        cycle_layout = QHBoxLayout()
+        cycle_layout.addWidget(QLabel("Cycle Number:"))
+        self.param_inputs["cycle_number"] = QLineEdit(str(self.trajectory_params["cycle_number"]))
+        cycle_layout.addWidget(self.param_inputs["cycle_number"])
+        cycle_layout.addStretch()  # Add stretch to keep it compact
+        traj_layout.addLayout(cycle_layout)
 
         # Linear DOFs
-        linear_box = QGroupBox("Linear DOFs (X, Y, Z)")
+        linear_box = QGroupBox("Linear Motion (X, Y, Z)")
         linear_layout = QGridLayout()
 
-        linear_layout.addWidget(QLabel("X Amp:"), 0,0)
+        # Header row
+        linear_layout.addWidget(QLabel("Axis"), 0, 0)
+        linear_layout.addWidget(QLabel("Amp (m)"), 0, 1)
+        linear_layout.addWidget(QLabel("Freq (Hz)"), 0, 2)
+        linear_layout.addWidget(QLabel("PGV (m/s)"), 0, 3)
+        linear_layout.addWidget(QLabel("PGA (m/s²)"), 0, 4)
+
+        # X axis
+        linear_layout.addWidget(QLabel("X:"), 1, 0)
         self.param_inputs["amp_x"] = QLineEdit(str(self.trajectory_params["amp_x"]))
-        linear_layout.addWidget(self.param_inputs["amp_x"], 0,1)
+        self.param_inputs["amp_x"].textChanged.connect(lambda: self.update_pgv_pga('x'))
+        linear_layout.addWidget(self.param_inputs["amp_x"], 1, 1)
 
-        linear_layout.addWidget(QLabel("X Freq:"), 0,2)
         self.param_inputs["freq_x"] = QLineEdit(str(self.trajectory_params["freq_x"]))
-        linear_layout.addWidget(self.param_inputs["freq_x"], 0,3)
+        self.param_inputs["freq_x"].textChanged.connect(lambda: self.update_pgv_pga('x'))
+        linear_layout.addWidget(self.param_inputs["freq_x"], 1, 2)
 
-        linear_layout.addWidget(QLabel("Y Amp:"), 1,0)
+        self.pgv_labels["x"] = QLabel("0.00")
+        linear_layout.addWidget(self.pgv_labels["x"], 1, 3)
+
+        self.pga_labels["x"] = QLabel("0.00")
+        linear_layout.addWidget(self.pga_labels["x"], 1, 4)
+
+        # Y axis
+        linear_layout.addWidget(QLabel("Y:"), 2, 0)
         self.param_inputs["amp_y"] = QLineEdit(str(self.trajectory_params["amp_y"]))
-        linear_layout.addWidget(self.param_inputs["amp_y"], 1,1)
+        self.param_inputs["amp_y"].textChanged.connect(lambda: self.update_pgv_pga('y'))
+        linear_layout.addWidget(self.param_inputs["amp_y"], 2, 1)
 
-        linear_layout.addWidget(QLabel("Y Freq:"), 1,2)
         self.param_inputs["freq_y"] = QLineEdit(str(self.trajectory_params["freq_y"]))
-        linear_layout.addWidget(self.param_inputs["freq_y"], 1,3)
+        self.param_inputs["freq_y"].textChanged.connect(lambda: self.update_pgv_pga('y'))
+        linear_layout.addWidget(self.param_inputs["freq_y"], 2, 2)
 
-        linear_layout.addWidget(QLabel("Z Amp:"), 2,0)
+        self.pgv_labels["y"] = QLabel("0.00")
+        linear_layout.addWidget(self.pgv_labels["y"], 2, 3)
+
+        self.pga_labels["y"] = QLabel("0.00")
+        linear_layout.addWidget(self.pga_labels["y"], 2, 4)
+
+        # Z axis
+        linear_layout.addWidget(QLabel("Z:"), 3, 0)
         self.param_inputs["amp_z"] = QLineEdit(str(self.trajectory_params["amp_z"]))
-        linear_layout.addWidget(self.param_inputs["amp_z"], 2,1)
+        self.param_inputs["amp_z"].textChanged.connect(lambda: self.update_pgv_pga('z'))
+        linear_layout.addWidget(self.param_inputs["amp_z"], 3, 1)
 
-        linear_layout.addWidget(QLabel("Z Freq:"), 2,2)
         self.param_inputs["freq_z"] = QLineEdit(str(self.trajectory_params["freq_z"]))
-        linear_layout.addWidget(self.param_inputs["freq_z"], 2,3)
+        self.param_inputs["freq_z"].textChanged.connect(lambda: self.update_pgv_pga('z'))
+        linear_layout.addWidget(self.param_inputs["freq_z"], 3, 2)
+
+        self.pgv_labels["z"] = QLabel("0.00")
+        linear_layout.addWidget(self.pgv_labels["z"], 3, 3)
+
+        self.pga_labels["z"] = QLabel("0.00")
+        linear_layout.addWidget(self.pga_labels["z"], 3, 4)
 
         linear_box.setLayout(linear_layout)
         traj_layout.addWidget(linear_box)
 
         # Rotational DOFs
-        rot_box = QGroupBox("Rotational DOFs (Roll, Pitch, Yaw)")
+        rot_box = QGroupBox("Rotational Motion (Roll, Pitch, Yaw)")
         rot_layout = QGridLayout()
 
-        rot_layout.addWidget(QLabel("Roll Amp:"), 0,0)
+        # Header row
+        rot_layout.addWidget(QLabel("Axis"), 0, 0)
+        rot_layout.addWidget(QLabel("Amp (rad)"), 0, 1)
+        rot_layout.addWidget(QLabel("Freq (Hz)"), 0, 2)
+        rot_layout.addWidget(QLabel("PGV (rad/s)"), 0, 3)
+        rot_layout.addWidget(QLabel("PGA (rad/s²)"), 0, 4)
+
+        # Roll axis
+        rot_layout.addWidget(QLabel("Roll:"), 1, 0)
         self.param_inputs["amp_roll"] = QLineEdit(str(self.trajectory_params["amp_roll"]))
-        rot_layout.addWidget(self.param_inputs["amp_roll"], 0,1)
+        self.param_inputs["amp_roll"].textChanged.connect(lambda: self.update_pgv_pga('roll'))
+        rot_layout.addWidget(self.param_inputs["amp_roll"], 1, 1)
 
-        rot_layout.addWidget(QLabel("Roll Freq:"), 0,2)
         self.param_inputs["freq_roll"] = QLineEdit(str(self.trajectory_params["freq_roll"]))
-        rot_layout.addWidget(self.param_inputs["freq_roll"], 0,3)
+        self.param_inputs["freq_roll"].textChanged.connect(lambda: self.update_pgv_pga('roll'))
+        rot_layout.addWidget(self.param_inputs["freq_roll"], 1, 2)
 
-        rot_layout.addWidget(QLabel("Pitch Amp:"),1,0)
+        self.pgv_labels["roll"] = QLabel("0.00")
+        rot_layout.addWidget(self.pgv_labels["roll"], 1, 3)
+
+        self.pga_labels["roll"] = QLabel("0.00")
+        rot_layout.addWidget(self.pga_labels["roll"], 1, 4)
+
+        # Pitch axis
+        rot_layout.addWidget(QLabel("Pitch:"), 2, 0)
         self.param_inputs["amp_pitch"] = QLineEdit(str(self.trajectory_params["amp_pitch"]))
-        rot_layout.addWidget(self.param_inputs["amp_pitch"],1,1)
+        self.param_inputs["amp_pitch"].textChanged.connect(lambda: self.update_pgv_pga('pitch'))
+        rot_layout.addWidget(self.param_inputs["amp_pitch"], 2, 1)
 
-        rot_layout.addWidget(QLabel("Pitch Freq:"),1,2)
         self.param_inputs["freq_pitch"] = QLineEdit(str(self.trajectory_params["freq_pitch"]))
-        rot_layout.addWidget(self.param_inputs["freq_pitch"],1,3)
+        self.param_inputs["freq_pitch"].textChanged.connect(lambda: self.update_pgv_pga('pitch'))
+        rot_layout.addWidget(self.param_inputs["freq_pitch"], 2, 2)
 
-        rot_layout.addWidget(QLabel("Yaw Amp:"),2,0)
+        self.pgv_labels["pitch"] = QLabel("0.00")
+        rot_layout.addWidget(self.pgv_labels["pitch"], 2, 3)
+
+        self.pga_labels["pitch"] = QLabel("0.00")
+        rot_layout.addWidget(self.pga_labels["pitch"], 2, 4)
+
+        # Yaw axis
+        rot_layout.addWidget(QLabel("Yaw:"), 3, 0)
         self.param_inputs["amp_yaw"] = QLineEdit(str(self.trajectory_params["amp_yaw"]))
-        rot_layout.addWidget(self.param_inputs["amp_yaw"],2,1)
+        self.param_inputs["amp_yaw"].textChanged.connect(lambda: self.update_pgv_pga('yaw'))
+        rot_layout.addWidget(self.param_inputs["amp_yaw"], 3, 1)
 
-        rot_layout.addWidget(QLabel("Yaw Freq:"),2,2)
         self.param_inputs["freq_yaw"] = QLineEdit(str(self.trajectory_params["freq_yaw"]))
-        rot_layout.addWidget(self.param_inputs["freq_yaw"],2,3)
+        self.param_inputs["freq_yaw"].textChanged.connect(lambda: self.update_pgv_pga('yaw'))
+        rot_layout.addWidget(self.param_inputs["freq_yaw"], 3, 2)
+
+        self.pgv_labels["yaw"] = QLabel("0.00")
+        rot_layout.addWidget(self.pgv_labels["yaw"], 3, 3)
+
+        self.pga_labels["yaw"] = QLabel("0.00")
+        rot_layout.addWidget(self.pga_labels["yaw"], 3, 4)
 
         rot_box.setLayout(rot_layout)
         traj_layout.addWidget(rot_box)
@@ -442,6 +524,10 @@ class PyBulletGUI(QWidget):
         main_layout.addWidget(obj_group)
 
         self.start_position_monitor()
+        
+        # Initialize PGV/PGA calculations
+        self.initialize_pgv_pga()
+        
         self.setLayout(main_layout)
 
     ###########################################################################
@@ -451,14 +537,52 @@ class PyBulletGUI(QWidget):
         """Position updates are handled inside on_tick via QTimer."""
         pass
 
+    def initialize_pgv_pga(self):
+        """Initialize PGV and PGA calculations for all axes."""
+        axes = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
+        for axis in axes:
+            self.update_pgv_pga(axis)
+
+    def update_pgv_pga(self, axis):
+        """
+        Update PGV and PGA values for a given axis based on amplitude and frequency.
+        PGV = 2π × f × Amp
+        PGA = (2π × f)² × Amp
+        """
+        try:
+            # Get amplitude and frequency values
+            amp_text = self.param_inputs[f"amp_{axis}"].text()
+            freq_text = self.param_inputs[f"freq_{axis}"].text()
+            
+            amplitude = float(amp_text) if amp_text else 0.0
+            frequency = float(freq_text) if freq_text else 0.0
+            
+            # Calculate PGV and PGA
+            omega = 2 * math.pi * frequency  # Angular frequency
+            pgv = omega * amplitude          # Peak Ground Velocity
+            pga = omega * omega * amplitude  # Peak Ground Acceleration
+            
+            # Update the display labels
+            self.pgv_labels[axis].setText(f"{pgv:.3f}")
+            self.pga_labels[axis].setText(f"{pga:.3f}")
+            
+        except (ValueError, KeyError):
+            # Handle invalid input or missing widgets
+            if axis in self.pgv_labels:
+                self.pgv_labels[axis].setText("0.000")
+            if axis in self.pga_labels:
+                self.pga_labels[axis].setText("0.000")
+
     def on_tick(self):
         """Main simulation tick on the Qt main thread. on_tick is active when 
         the simulation is running, and it steps the physics simulation, updates
         the trajectory if active, and refreshes the pedestal position label at
         a reduced rate to avoid UI lag.
         """
-        if not self.simulation_core or self.simulation_core.robot_id is None:
+        # Don't execute if simulation core doesn't exist or if paused
+        if not self.simulation_core or self.simulation_core.robot_id is None or self.paused:
             return
+            
         try:
             # Step physics on the correct client; running on main thread prevents GUI/Metal crashes
             p.stepSimulation(physicsClientId=self.simulation_core.client_id)
@@ -472,23 +596,34 @@ class PyBulletGUI(QWidget):
                 self.simulation_core.execute_trajectory_tick(
                     self.trajectory_params,
                     t=getattr(self, "_traj_t", 0.0),
-                    dt=getattr(self, "_traj_dt", 0.01),
                     real_time=getattr(self, "_traj_realtime", False),
                 )
                 # Advance local trajectory time
-                self._traj_t = getattr(self, "_traj_t", 0.0) + getattr(self, "_traj_dt", 0.01)
+                self._traj_t = getattr(self, "_traj_t", 0.0) + self.simulation_dt
                 if self._traj_t >= getattr(self, "_traj_duration", 20.0):
                     self.stop_trajectory()
+                    print("[on_tick] Trajectory completed.")
             except Exception as e:
                 print(f"[on_tick] trajectory tick error: {e}")
 
         # Update pedestal position label at a reduced rate
         try:
-            if (self._tick_counter % 24) == 0:  # ~10 Hz if tick_hz=240
+            if (self._tick_counter % (self.simulation_frequency // self.GUI_update_hz)) == 0:  
                 link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
                 if link_state:
                     pos = link_state[0]
-                    self.position_label.setText(f"Pedestal Position: {pos}")
+                    orn_quat = link_state[1]  # Quaternion orientation
+                    
+                    # Convert quaternion to Euler angles (roll, pitch, yaw) in radians
+                    orn_euler = p.getEulerFromQuaternion(orn_quat)
+                    
+                    # Convert to degrees
+                    roll_deg = math.degrees(orn_euler[0])
+                    pitch_deg = math.degrees(orn_euler[1])
+                    yaw_deg = math.degrees(orn_euler[2])
+                    
+                    self.position_label.setText(f"Pedestal Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
+                    self.orientation_label.setText(f"Pedestal Orientation: Roll={roll_deg:.2f}°, Pitch={pitch_deg:.2f}°, Yaw={yaw_deg:.2f}°")
         except Exception:
             pass
         finally:
@@ -497,33 +632,88 @@ class PyBulletGUI(QWidget):
     ###########################################################################
     # Simulation
     ###########################################################################
-    def toggle_simulation(self):
-        if not self.running:
-            self.start_simulation()
-        else:
-            self.stop_simulation()
-
     def start_simulation(self):
+        """Start the simulation."""
         if self.simulation_core is None:
             self.simulation_core = SimulationCore("config.yaml")
             self.simulation_core.create_robot()
+            # Update button states after creating simulation core
+            self.update_button_states()
 
         if self.simulation_core.robot_id is None:
             print("Error: Failed to create robot.")
             return
 
         self.running = True
-        self.start_button.setText("Stop Simulation")
+        self.paused = False
+        self.update_button_states()
 
         # Start Qt timer
         interval_ms = int(1000 / self.tick_hz)
         self.timer.start(interval_ms)
 
     def stop_simulation(self):
+        """Stop the simulation completely."""
         self.running = False
-        self.start_button.setText("Start Simulation")
+        self.paused = False
         if self.timer.isActive():
             self.timer.stop()
+        
+        # Stop trajectory if running
+        if self.trajectory_running:
+            self.stop_trajectory()
+            
+        self.update_button_states()
+
+    def toggle_pause_simulation(self):
+        """Toggle pause/resume for the simulation."""
+        if not self.running:
+            return  # Can't pause if not running
+            
+        if self.paused:
+            # Resume simulation
+            self.paused = False
+            if not self.timer.isActive():
+                interval_ms = int(1000 / self.tick_hz)
+                self.timer.start(interval_ms)
+        else:
+            # Pause simulation
+            self.paused = True
+            if self.timer.isActive():
+                self.timer.stop()
+                
+        self.update_button_states()
+
+    def update_button_states(self):
+        """Update button enabled/disabled states and text based on current simulation state."""
+        if self.simulation_core is None:
+            # No simulation created yet
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.pause_button.setEnabled(False)
+            self.reset_button.setEnabled(False)
+            self.pause_button.setText("Pause Simulation")
+        elif self.running and not self.paused:
+            # Simulation is running
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.pause_button.setEnabled(True)
+            self.reset_button.setEnabled(False)
+            self.pause_button.setText("Pause Simulation")
+        elif self.running and self.paused:
+            # Simulation is paused
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.pause_button.setEnabled(True)
+            self.reset_button.setEnabled(False)
+            self.pause_button.setText("Resume Simulation")
+        else:
+            # Simulation is stopped but core exists
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.pause_button.setEnabled(False)
+            self.reset_button.setEnabled(True)
+            self.pause_button.setText("Pause Simulation")
 
     def run_simulation(self):
         """Unused: simulation is advanced by on_tick() via QTimer on the main thread."""
@@ -531,23 +721,60 @@ class PyBulletGUI(QWidget):
 
     def reset_simulation(self):
         """Resets PyBullet simulation and re-applies all settings."""
-        if self.simulation_core:
-            # Stop ticking during reset
-            if self.timer.isActive():
-                self.timer.stop()
-            self.running = False
-            self.start_button.setText("Start Simulation")
+        # Check if simulation is currently running or paused
+        if self.running:
+            # Show error dialog prompting user to stop simulation first
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Cannot Reset Simulation")
+            msg.setText("Simulation is currently running or paused.")
+            msg.setInformativeText("Please stop the simulation before resetting.")
+            msg.setDetailedText(
+                "To reset the simulation:\n"
+                "1. Click 'Stop Simulation' button\n"
+                "2. Then click 'Reset Simulation' button\n\n"
+                "This ensures a clean and safe reset of the physics simulation."
+            )
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec_()
+            return
+        
+        # Check if trajectory is running
+        if getattr(self, 'trajectory_running', False):
+            # Show error dialog prompting user to stop trajectory first
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Cannot Reset Simulation")
+            msg.setText("Trajectory execution is currently running.")
+            msg.setInformativeText("Please stop the trajectory before resetting.")
+            msg.setDetailedText(
+                "To reset the simulation:\n"
+                "1. Click 'Stop Trajectory' button\n"
+                "2. Click 'Stop Simulation' button (if running)\n"
+                "3. Then click 'Reset Simulation' button\n\n"
+                "This ensures a clean and safe reset of the physics simulation."
+            )
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec_()
+            return
 
+        # Proceed with reset only if simulation is stopped
+        if self.simulation_core:
             # Reset everything on the correct client
             p.resetSimulation(physicsClientId=self.simulation_core.client_id)
 
             # Re-apply physics settings
             p.setTimeStep(self.simulation_core.time_step, self.simulation_core.client_id)
             p.setGravity(*self.simulation_core.gravity, physicsClientId=self.simulation_core.client_id)
-            p.setRealTimeSimulation(0, physicsClientId=self.simulation_core.client_id)
+            #p.setRealTimeSimulation(1 if self.simulation_core.use_real_time else 0, physicsClientId=self.simulation_core.client_id)
 
             # Re-create your robot (and environment if needed)
             self.simulation_core.create_robot()
+            
+            # Update button states after reset
+            self.update_button_states()
+            
+            print("Simulation reset completed successfully.")
 
 
     ###########################################################################
@@ -570,12 +797,28 @@ class PyBulletGUI(QWidget):
 
         # Per-trajectory state used by on_tick()
         self._traj_t = 0.0
-        try:
-            self._traj_dt = float(self.trajectory_params.get("timestep", 0.01))
-        except Exception:
-            self._traj_dt = 0.01
-        self._traj_duration = float(self.trajectory_params.get("duration", 20.0))
-        self._traj_realtime = bool(self.realtime_checkbox.isChecked())
+        
+        # Calculate duration based on cycle number and the smallest non-zero frequency (slowest axis)
+        cycle_number = float(self.trajectory_params.get("cycle_number", 10))
+        freqs = [
+            self.trajectory_params.get("freq_x", 0.0),
+            self.trajectory_params.get("freq_y", 0.0),
+            self.trajectory_params.get("freq_z", 0.0),
+            self.trajectory_params.get("freq_roll", 0.0),
+            self.trajectory_params.get("freq_pitch", 0.0),
+            self.trajectory_params.get("freq_yaw", 0.0),
+        ]
+        # Filter out zeros to avoid division by zero and pick the smallest non-zero frequency
+        nonzero_freqs = [f for f in freqs if f > 0.0]
+        if nonzero_freqs:
+            min_freq = min(nonzero_freqs)
+            self._traj_duration = cycle_number / min_freq
+        else:
+            # Fallback if all frequencies are zero
+            self._traj_duration = 20.0
+            
+        self._traj_realtime = False  # Always offline mode (real-time checkbox removed)
+        print(f"Starting trajectory for {cycle_number} cycles, duration: {self._traj_duration:.2f}s")
 
     def stop_trajectory(self):
         self.trajectory_running = False
@@ -586,8 +829,7 @@ class PyBulletGUI(QWidget):
             print("Error: SimulationCore is not initialized.")
             return
 
-        real_time = self.realtime_checkbox.isChecked()
-        print(f"Executing trajectory in {'real-time' if real_time else 'offline'} mode.")
+        print("Executing trajectory in offline mode.")
         # Note: Trajectory execution is now handled by execute_trajectory_tick in on_tick()
         # This method is kept for compatibility but actual execution happens via QTimer
 
@@ -595,11 +837,18 @@ class PyBulletGUI(QWidget):
         self.trajectory_button.setText("Execute Trajectory")
 
     def update_trajectory_params(self):
+        """Update trajectory parameters from GUI inputs."""
         for key in self.trajectory_params:
-            try:
-                self.trajectory_params[key] = float(self.param_inputs[key].text())
-            except ValueError:
-                print(f"Warning: invalid input for '{key}' -> using default {self.trajectory_params[key]}")
+            if key in self.param_inputs:
+                try:
+                    self.trajectory_params[key] = float(self.param_inputs[key].text())
+                except ValueError:
+                    print(f"Warning: invalid input for '{key}' -> using default {self.trajectory_params[key]}")
+        
+        # Also update PGV/PGA calculations when parameters change
+        axes = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
+        for axis in axes:
+            self.update_pgv_pga(axis)
 
     ###########################################################################
     # Upload OBJ with Live Preview
