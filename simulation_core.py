@@ -5,6 +5,9 @@ import pybullet as p
 import pybullet_data
 import time
 import math
+import logging
+import os
+from datetime import datetime
 
 class SimulationCore:
     def __init__(self, yaml_path="config.yaml"):
@@ -18,6 +21,10 @@ class SimulationCore:
         self.time_step = 1.0 / self.simulation_frequency
         self.enable_graphics = self.config["simulation_settings"]["enable_graphics"]
         self.use_real_time = self.config["simulation_settings"]["use_real_time"]
+        
+        # Setup logging
+        log_file_path = self.config["simulation_settings"].get("log_file", "data/simulation.log")
+        self._setup_logging(log_file_path)
 
         if p.isConnected():  # If already connected, disconnect first
             p.disconnect()
@@ -28,7 +35,6 @@ class SimulationCore:
         # Set physics
         p.setTimeStep(self.time_step, self.client_id)
         p.setGravity(*self.gravity, self.client_id)
-        #p.setRealTimeSimulation(1 if self.use_real_time else 0)
 
 
         # Load structure config
@@ -40,12 +46,48 @@ class SimulationCore:
 
         self.robot_id = None
 
+    def _setup_logging(self, log_file_path):
+        """Setup logging to file with timestamp."""
+        # Create directory if it doesn't exist
+        log_dir = os.path.dirname(log_file_path)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        
+        # Configure logging
+        self.logger = logging.getLogger('SimulationCore')
+        self.logger.setLevel(logging.INFO)
+        
+        # Remove existing handlers to avoid duplicates
+        self.logger.handlers = []
+        
+        # File handler with UTF-8 encoding to support Unicode characters
+        file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        
+        # Formatter with timestamp
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        
+        self.logger.addHandler(file_handler)
+        
+        # Log initialization
+        self.logger.info("="*80)
+        self.logger.info("SimulationCore initialized")
+        self.logger.info(f"Gravity: {self.gravity}")
+        self.logger.info(f"Simulation frequency: {self.simulation_frequency} Hz")
+        self.logger.info(f"Time step: {self.time_step} s")
+        self.logger.info(f"Graphics enabled: {self.enable_graphics}")
+        self.logger.info(f"Real-time mode: {self.use_real_time}")
+
     def create_robot(self):
-        print("Creating 6-DOF Robot...")
+        self.logger.info("Creating 6-DOF Robot...")
 
         # Load the plane
         plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
-        print(f"Plane loaded with ID: {plane_id}")
+        self.logger.info(f"Plane loaded with ID: {plane_id}")
 
         # 1) World box
         world_box_half_extents = [dim / 2 for dim in self.world_box_config["dimensions"]]
@@ -113,7 +155,7 @@ class SimulationCore:
         
         # todo: set range limits and max efforts from YAML
 
-        print(f"Robot created with ID: {self.robot_id}")
+        self.logger.info(f"Robot created with ID: {self.robot_id}")
 
         # Set camera view
         p.resetDebugVisualizerCamera(
@@ -132,10 +174,11 @@ class SimulationCore:
         # Set joint limits and maximum efforts
         self.set_joint_limits_and_efforts()
         
-        print("Pedestal and dynamics applied.")
+        self.logger.info("Pedestal and dynamics applied.")
 
     def apply_physics_properties(self):
-        print("Applying Physics Properties...")
+        self.logger.info("Applying Physics Properties...")
+        
         # World Box
         p.changeDynamics(
             self.robot_id,
@@ -147,7 +190,18 @@ class SimulationCore:
             contactStiffness=self.dynamics_config["world_box"]["contactStiffness"],
             physicsClientId=self.client_id
         )
-        print(f"World Box Dynamics: {p.getDynamicsInfo(self.robot_id, -1)}")
+        
+        # Get and log world box dynamics
+        wb_dynamics = p.getDynamicsInfo(self.robot_id, -1, physicsClientId=self.client_id)
+        self.logger.info("World Box Dynamics:")
+        self.logger.info(f"  Mass: {wb_dynamics[0]}")
+        self.logger.info(f"  Lateral Friction: {wb_dynamics[1]}")
+        self.logger.info(f"  Local Inertia Diagonal: {wb_dynamics[2]}")
+        self.logger.info(f"  Restitution: {wb_dynamics[5]}")
+        self.logger.info(f"  Rolling Friction: {wb_dynamics[6]}")
+        self.logger.info(f"  Spinning Friction: {wb_dynamics[7]}")
+        self.logger.info(f"  Contact Damping: {wb_dynamics[8]}")
+        self.logger.info(f"  Contact Stiffness: {wb_dynamics[9]}")
 
         # Pedestal links
         for i in range(4):
@@ -162,7 +216,18 @@ class SimulationCore:
                 localInertiaDiagonal=self.pedestal_config["inertia"],
                 physicsClientId=self.client_id
             )
-            print(f"Pedestal Link {i} Dynamics: {p.getDynamicsInfo(self.robot_id, i)}")
+            
+            # Get and log pedestal dynamics
+            ped_dynamics = p.getDynamicsInfo(self.robot_id, i, physicsClientId=self.client_id)
+            self.logger.info(f"Pedestal Link {i} Dynamics:")
+            self.logger.info(f"  Mass: {ped_dynamics[0]}")
+            self.logger.info(f"  Lateral Friction: {ped_dynamics[1]}")
+            self.logger.info(f"  Local Inertia Diagonal: {ped_dynamics[2]}")
+            self.logger.info(f"  Restitution: {ped_dynamics[5]}")
+            self.logger.info(f"  Rolling Friction: {ped_dynamics[6]}")
+            self.logger.info(f"  Spinning Friction: {ped_dynamics[7]}")
+            self.logger.info(f"  Contact Damping: {ped_dynamics[8]}")
+            self.logger.info(f"  Contact Stiffness: {ped_dynamics[9]}")
 
     def calculate_maximum_efforts(self):
         """
@@ -203,11 +268,11 @@ class SimulationCore:
             "spherical": max_torque
         }
         
-        print(f"Calculated maximum efforts:")
-        print(f"  Prismatic X: {max_force_x:.2e} N")
-        print(f"  Prismatic Y: {max_force_y:.2e} N")
-        print(f"  Prismatic Z: {max_force_z:.2e} N")
-        print(f"  Spherical: {max_torque:.2e} N⋅m")
+        self.logger.info("Calculated maximum efforts:")
+        self.logger.info(f"  Prismatic X: {max_force_x:.2e} N")
+        self.logger.info(f"  Prismatic Y: {max_force_y:.2e} N")
+        self.logger.info(f"  Prismatic Z: {max_force_z:.2e} N")
+        self.logger.info(f"  Spherical: {max_torque:.2e} N*m")
         
         return efforts
 
@@ -215,7 +280,7 @@ class SimulationCore:
         """
         Set joint position limits, velocity limits, and maximum efforts based on configuration.
         """
-        print("Setting joint limits and maximum efforts...")
+        self.logger.info("Setting joint limits and maximum efforts...")
         
         # Calculate maximum efforts
         self.max_efforts = self.calculate_maximum_efforts()
@@ -248,10 +313,10 @@ class SimulationCore:
                 physicsClientId=self.client_id
             )
             
-            print(f"Joint {joint_idx} ({joint_name}):")
-            print(f"  Position limits: [{lower_limit}, {upper_limit}]")
-            print(f"  Max velocity: {max_velocity} m/s")
-            print(f"  Max force: {max_force:.2e} N")
+            self.logger.info(f"Joint {joint_idx} ({joint_name}):")
+            self.logger.info(f"  Position limits: [{lower_limit}, {upper_limit}]")
+            self.logger.info(f"  Max velocity: {max_velocity} m/s")
+            self.logger.info(f"  Max force: {max_force:.2e} N")
         
         # For spherical joint (joint 3), set position limits and torque limits
         spherical_config = self.joint_config["spherical_joint"]
@@ -271,12 +336,12 @@ class SimulationCore:
                 maxJointVelocity=max_angular_velocity,
                 physicsClientId=self.client_id
             )
-            print(f"Joint 3 (spherical):")
-            print(f"  Position limits: [{lower_limit}, {upper_limit}] rad")
-            print(f"  Max angular velocity: {max_angular_velocity} rad/s")
-            print(f"  Max torque: {max_torque:.2e} N⋅m")
+            self.logger.info(f"Joint 3 (spherical):")
+            self.logger.info(f"  Position limits: [{lower_limit}, {upper_limit}] rad")
+            self.logger.info(f"  Max angular velocity: {max_angular_velocity} rad/s")
+            self.logger.info(f"  Max torque: {max_torque:.2e} N*m")
         except Exception as e:
-            print(f"Warning: Could not set all spherical joint limits: {e}")
+            self.logger.warning(f"Could not set all spherical joint limits: {e}")
             # Fallback: try setting only velocity limit
             try:
                 p.changeDynamics(
@@ -285,14 +350,14 @@ class SimulationCore:
                     maxJointVelocity=max_angular_velocity,
                     physicsClientId=self.client_id
                 )
-                print(f"Joint 3 (spherical) - fallback:")
-                print(f"  Max angular velocity: {max_angular_velocity} rad/s")
-                print(f"  Max torque: {max_torque:.2e} N⋅m")
-                print(f"  Note: Position limits [{lower_limit}, {upper_limit}] rad may not be enforced")
+                self.logger.info(f"Joint 3 (spherical) - fallback:")
+                self.logger.info(f"  Max angular velocity: {max_angular_velocity} rad/s")
+                self.logger.info(f"  Max torque: {max_torque:.2e} N*m")
+                self.logger.info(f"  Note: Position limits [{lower_limit}, {upper_limit}] rad may not be enforced")
             except Exception as e2:
-                print(f"Error: Could not set spherical joint properties: {e2}")
+                self.logger.error(f"Could not set spherical joint properties: {e2}")
 
-    def execute_trajectory(self, params, t: float, real_time: bool = False):
+    def step_trajectory(self, params, t: float):
         """
         Apply one incremental trajectory command at time t using VELOCITY CONTROL.
         Joints 0-2 are prismatic (x,y,z), joint 3 is spherical (roll, pitch, yaw).
@@ -364,7 +429,7 @@ class SimulationCore:
                 physicsClientId=self.client_id
             )
         except Exception as e:
-            print(f"[SimulationCore.execute_trajectory] error: {e}")
+            self.logger.error(f"step_trajectory error: {e}")
 
 
     def spawn_obj_on_pedestal(
@@ -396,13 +461,13 @@ class SimulationCore:
         :return: The newly created object ID (int), or None on error.
         """
         if self.robot_id is None:
-            print("Error: Robot has not been created yet.")
+            self.logger.error("Robot has not been created yet.")
             return None
 
         # 1) Get pedestal link (index=3) state
         pedestal_state = p.getLinkState(self.robot_id, 3)
         if not pedestal_state:
-            print("Error: Could not get pedestal link state.")
+            self.logger.error("Could not get pedestal link state.")
             return None
 
         pedestal_pos = pedestal_state[0]  # (x, y, z)
@@ -441,18 +506,15 @@ class SimulationCore:
             baseOrientation=final_orientation
         )
         if obj_id < 0:
-            print("Error: Failed to create OBJ multiBody.")
+            self.logger.error("Failed to create OBJ multiBody.")
             return None
 
-        print(
-            f"Spawned OBJ '{obj_path}' at {final_position} "
-            f"(Euler={orientation_euler}), ID={obj_id}"
-        )
+        self.logger.info(f"Spawned OBJ '{obj_path}' at {final_position} (Euler={orientation_euler}), ID={obj_id}")
 
         # 6) Always enable collision between this new object (linkIndex = -1)
         #    and the pedestal link (index=3) in the robot multibody
         p.setCollisionFilterPair(obj_id, self.robot_id, -1, 3, enableCollision=1)
-        print("Collision is always enabled with pedestal link=3.")
+        self.logger.info("Collision enabled with pedestal link=3.")
 
         # 7) If we have PBR properties, apply them
         if pbr_props:
@@ -466,7 +528,18 @@ class SimulationCore:
                 contactStiffness=pbr_props.get("contactStiffness", 1e5),
                 physicsClientId=self.client_id
             )
-            print(f"Applied PBR properties: {pbr_props}")
-            print(f"Dynamics Info: {p.getDynamicsInfo(obj_id, -1)}")
+            self.logger.info(f"Applied PBR properties: {pbr_props}")
+            
+            # Get and log the actual dynamics info
+            obj_dynamics = p.getDynamicsInfo(obj_id, -1, physicsClientId=self.client_id)
+            self.logger.info("Object Physics Properties:")
+            self.logger.info(f"  Mass: {obj_dynamics[0]}")
+            self.logger.info(f"  Lateral Friction: {obj_dynamics[1]}")
+            self.logger.info(f"  Local Inertia Diagonal: {obj_dynamics[2]}")
+            self.logger.info(f"  Restitution: {obj_dynamics[5]}")
+            self.logger.info(f"  Rolling Friction: {obj_dynamics[6]}")
+            self.logger.info(f"  Spinning Friction: {obj_dynamics[7]}")
+            self.logger.info(f"  Contact Damping: {obj_dynamics[8]}")
+            self.logger.info(f"  Contact Stiffness: {obj_dynamics[9]}")
 
         return obj_id

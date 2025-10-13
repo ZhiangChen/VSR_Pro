@@ -4,6 +4,8 @@ import time
 import math
 import threading
 import yaml
+import logging
+import os
 
 import pybullet as p
 
@@ -19,7 +21,7 @@ from simulation_core import SimulationCore
 ###############################################################################
 # Enhanced Dialog for PBR/Collision + Live Preview
 ###############################################################################
-class EnhancedPBRLoadDialog(QDialog):
+class PBRLoadDialog(QDialog):
     """
     A dialog for live preview spawning an OBJ with user-specified
     offset/orientation + PBR and collision settings.
@@ -29,12 +31,13 @@ class EnhancedPBRLoadDialog(QDialog):
       - Confirm: finalize (keep the object)
       - Cancel: remove the object
     """
-    def __init__(self, obj_path, simulation_core, parent=None):
+    def __init__(self, simulation_core, obj_path=None, parent=None, pedestal_half_z=0.0):
         super().__init__(parent)
-        self.obj_path = obj_path
+        self.obj_path = obj_path  # Can be None initially
         self.sim_core = simulation_core
+        self.pedestal_half_z = pedestal_half_z
 
-        self.setWindowTitle("Spawn OBJ with PBR & Collision - Live Preview")
+        self.setWindowTitle("Spawn OBJ with PBR & Collision Properties")
 
         # Default offsets/orientation
         self.default_x = 0.0
@@ -53,36 +56,59 @@ class EnhancedPBRLoadDialog(QDialog):
         main_layout = QVBoxLayout()
 
         # ---------------------------------------------------------------------
+        # 0) OBJ File Selection
+        # ---------------------------------------------------------------------
+        file_group = QGroupBox("OBJ File")
+        file_layout = QHBoxLayout()
+        
+        self.obj_path_label = QLabel("No file selected" if not self.obj_path else self.obj_path)
+        self.obj_path_label.setWordWrap(True)
+        file_layout.addWidget(self.obj_path_label, stretch=1)
+        
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.clicked.connect(self.browse_obj_file)
+        file_layout.addWidget(self.browse_button)
+        
+        file_group.setLayout(file_layout)
+        main_layout.addWidget(file_group)
+
+        # ---------------------------------------------------------------------
         # 1) Position & Orientation
         # ---------------------------------------------------------------------
-        pose_group = QGroupBox("Position & Orientation")
-        pose_layout = QHBoxLayout()
+        pose_group = QGroupBox("Pose (to pedestal top center)")
+        pose_layout = QGridLayout()
 
-        # Position
-        pose_layout.addWidget(QLabel("X:"))
+        # First row: Position (X, Y, Z)
+        pose_layout.addWidget(QLabel("X(m):"), 0, 0)
         self.x_input = QLineEdit(str(self.default_x))
-        pose_layout.addWidget(self.x_input)
+        self.x_input.setFixedWidth(80)
+        pose_layout.addWidget(self.x_input, 0, 1)
 
-        pose_layout.addWidget(QLabel("Y:"))
+        pose_layout.addWidget(QLabel("Y(m):"), 0, 2)
         self.y_input = QLineEdit(str(self.default_y))
-        pose_layout.addWidget(self.y_input)
+        self.y_input.setFixedWidth(80)
+        pose_layout.addWidget(self.y_input, 0, 3)
 
-        pose_layout.addWidget(QLabel("Z:"))
+        pose_layout.addWidget(QLabel("Z(m):"), 0, 4)
         self.z_input = QLineEdit(str(self.default_z))
-        pose_layout.addWidget(self.z_input)
+        self.z_input.setFixedWidth(80)
+        pose_layout.addWidget(self.z_input, 0, 5)
 
-        # Orientation (deg)
-        pose_layout.addWidget(QLabel("Roll(deg):"))
+        # Second row: Orientation (Roll, Pitch, Yaw in degrees)
+        pose_layout.addWidget(QLabel("Roll(deg):"), 1, 0)
         self.roll_input = QLineEdit(str(math.degrees(self.default_roll)))
-        pose_layout.addWidget(self.roll_input)
+        self.roll_input.setFixedWidth(80)
+        pose_layout.addWidget(self.roll_input, 1, 1)
 
-        pose_layout.addWidget(QLabel("Pitch(deg):"))
+        pose_layout.addWidget(QLabel("Pitch(deg):"), 1, 2)
         self.pitch_input = QLineEdit(str(math.degrees(self.default_pitch)))
-        pose_layout.addWidget(self.pitch_input)
+        self.pitch_input.setFixedWidth(80)
+        pose_layout.addWidget(self.pitch_input, 1, 3)
 
-        pose_layout.addWidget(QLabel("Yaw(deg):"))
+        pose_layout.addWidget(QLabel("Yaw(deg):"), 1, 4)
         self.yaw_input = QLineEdit(str(math.degrees(self.default_yaw)))
-        pose_layout.addWidget(self.yaw_input)
+        self.yaw_input.setFixedWidth(80)
+        pose_layout.addWidget(self.yaw_input, 1, 5)
 
         pose_group.setLayout(pose_layout)
         main_layout.addWidget(pose_group)
@@ -95,8 +121,9 @@ class EnhancedPBRLoadDialog(QDialog):
 
 
         # mass
-        pbr_layout.addWidget(QLabel("Mass:"), 1, 0)
+        pbr_layout.addWidget(QLabel("Mass(kg):"), 1, 0)
         self.mass_input = QLineEdit("0.0")
+        #self.mass_input.setFixedWidth(120)
         pbr_layout.addWidget(self.mass_input, 1, 1)
 
         # restitution
@@ -105,12 +132,12 @@ class EnhancedPBRLoadDialog(QDialog):
         pbr_layout.addWidget(self.restitution_input, 2, 1)
 
         # friction
-        pbr_layout.addWidget(QLabel("Friction:"), 3, 0)
-        self.friction_input = QLineEdit("0.5")
-        pbr_layout.addWidget(self.friction_input, 3, 1)
+        pbr_layout.addWidget(QLabel("Lateral Friction:"), 3, 0)
+        self.lateral_friction_input = QLineEdit("0.5")
+        pbr_layout.addWidget(self.lateral_friction_input, 3, 1)
 
         # spinning friction
-        pbr_layout.addWidget(QLabel("Spinning Fric:"), 4, 0)
+        pbr_layout.addWidget(QLabel("Spinning Friction:"), 4, 0)
         self.spinning_input = QLineEdit("0.1")
         pbr_layout.addWidget(self.spinning_input, 4, 1)
 
@@ -190,7 +217,7 @@ class EnhancedPBRLoadDialog(QDialog):
 
         # friction
         try:
-            pbr_props["lateralFriction"] = float(self.friction_input.text())
+            pbr_props["lateralFriction"] = float(self.lateral_friction_input.text())
         except ValueError:
             pbr_props["lateralFriction"] = 0.5
 
@@ -215,9 +242,38 @@ class EnhancedPBRLoadDialog(QDialog):
         return pbr_props
 
     # -------------------------------------------------------------------------
+    # Browse for OBJ file
+    # -------------------------------------------------------------------------
+    def browse_obj_file(self):
+        """Open file dialog to select an OBJ file."""
+        obj_path, _ = QFileDialog.getOpenFileName(self, "Select OBJ File", "", "OBJ Files (*.obj)")
+        if obj_path:
+            self.obj_path = obj_path
+            self.obj_path_label.setText(obj_path)
+            # Note: parent is PyBulletGUI which has logger
+            if hasattr(self.parent(), 'logger'):
+                self.parent().logger.info(f"Selected OBJ file: {obj_path}")
+            
+            # If there's an existing preview object, remove it since we're changing files
+            if self.preview_obj_id is not None:
+                p.removeBody(self.preview_obj_id)
+                self.preview_obj_id = None
+                if hasattr(self.parent(), 'logger'):
+                    self.parent().logger.info("Removed previous preview object due to file change.")
+
+    # -------------------------------------------------------------------------
     # "Apply" => spawn or update live
     # -------------------------------------------------------------------------
     def on_apply(self):
+        # Check if OBJ file is selected
+        if not self.obj_path:
+            QMessageBox.warning(
+                self,
+                "No File Selected",
+                "Please select an OBJ file first by clicking the 'Browse...' button."
+            )
+            return
+        
         offset, orientation_euler = self.parse_transform()
         pbr_props = self.parse_pbr()
 
@@ -230,7 +286,8 @@ class EnhancedPBRLoadDialog(QDialog):
                 orientation_euler=orientation_euler,
                 pbr_props=pbr_props
             )
-            print(f"[Apply] Created new object with ID={self.preview_obj_id}")
+            if hasattr(self.parent(), 'logger'):
+                self.parent().logger.info(f"[GUI] Created new object with ID={self.preview_obj_id}")
         else:
             # Already spawned => update transform & dynamics
             # 1) compute final position based on pedestal
@@ -239,7 +296,7 @@ class EnhancedPBRLoadDialog(QDialog):
             final_pos = [
                 ped_pos[0] + offset[0],
                 ped_pos[1] + offset[1],
-                ped_pos[2] + offset[2]
+                ped_pos[2] + offset[2] + self.pedestal_half_z
             ]
             final_orn = p.getQuaternionFromEuler(orientation_euler)
 
@@ -261,7 +318,8 @@ class EnhancedPBRLoadDialog(QDialog):
                 contactStiffness=pbr_props.get("contactStiffness", 1e5),
                 physicsClientId=self.sim_core.client_id
             )
-            print(f"[Apply] Updated object ID={self.preview_obj_id} to new transform & properties")
+            if hasattr(self.parent(), 'logger'):
+                self.parent().logger.info(f"[GUI] Updated object ID={self.preview_obj_id} to new transform & properties")
 
     # -------------------------------------------------------------------------
     # "Confirm" => keep the object
@@ -299,10 +357,11 @@ class PyBulletGUI(QWidget):
 
         self.use_real_time = self.config["simulation_settings"]["use_real_time"]
 
+        self.pedestal_half_z = self.config["structure"]["pedestal"]["dimensions"][2] / 2.0
         self.simulation_frequency = self.config["simulation_settings"].get("simulation_frequency", 500)
         self.simulation_dt = 1.0 / self.simulation_frequency
 
-        self.GUI_update_hz = 10  # GUI update frequency in Hz
+        self.GUI_update_hz = self.config["simulation_settings"].get("GUI_update_frequency", 60)
 
         # default trajectory params
         self.trajectory_params = {
@@ -328,7 +387,42 @@ class PyBulletGUI(QWidget):
         self.simulation_thread = None
         self.stop_simulation_flag = False
         
+        # Setup logging
+        log_file_path = self.config["simulation_settings"].get("log_file", "data/simulation.log")
+        self._setup_logging(log_file_path)
+        
         self.init_ui()
+
+    def _setup_logging(self, log_file_path):
+        """Setup logging to file with timestamp - shared with SimulationCore."""
+        # Create directory if it doesn't exist
+        log_dir = os.path.dirname(log_file_path)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        
+        # Configure logging
+        self.logger = logging.getLogger('GUI')
+        self.logger.setLevel(logging.INFO)
+        
+        # Remove existing handlers to avoid duplicates
+        self.logger.handlers = []
+        
+        # File handler with UTF-8 encoding to support Unicode characters
+        file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        
+        # Formatter with timestamp
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        
+        self.logger.addHandler(file_handler)
+        
+        # Log GUI initialization
+        self.logger.info("="*80)
+        self.logger.info("GUI Application started")
 
     def init_ui(self):
         self.setWindowTitle("VSR Pro")
@@ -520,7 +614,7 @@ class PyBulletGUI(QWidget):
         obj_group = QGroupBox("Object Upload")
         obj_layout = QVBoxLayout()
 
-        self.upload_obj_button = QPushButton("Upload OBJ (Live Preview)")
+        self.upload_obj_button = QPushButton("Upload PBR OBJ")
         self.upload_obj_button.clicked.connect(self.upload_obj)
         obj_layout.addWidget(self.upload_obj_button)
 
@@ -593,7 +687,7 @@ class PyBulletGUI(QWidget):
                 self.position_label.setText(f"Pedestal Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
                 self.orientation_label.setText(f"Pedestal Orientation: Roll={roll_deg:.2f}°, Pitch={pitch_deg:.2f}°, Yaw={yaw_deg:.2f}°")
         except Exception as e:
-            print(f"[update_gui_display] error: {e}")
+            self.logger.error(f"update_gui_display error: {e}")
 
     def run_trajectory_simulation(self):
         """
@@ -602,11 +696,11 @@ class PyBulletGUI(QWidget):
         Uses time.sleep() for real-time mode, or runs as fast as possible otherwise.
         """
         if not self.simulation_started:
-            print("[run_trajectory_simulation] Error: Simulation not started.")
+            self.logger.error("run_trajectory_simulation: Simulation not started.")
             return
             
         if not self.simulation_core or self.simulation_core.robot_id is None:
-            print("[run_trajectory_simulation] Error: Simulation core not initialized.")
+            self.logger.error("run_trajectory_simulation: Simulation core not initialized.")
             return
         
         # Calculate duration based on cycle number and the smallest non-zero frequency
@@ -624,12 +718,12 @@ class PyBulletGUI(QWidget):
             min_freq = min(nonzero_freqs)
             duration = cycle_number / min_freq
         else:
-            print("[run_trajectory_simulation] Warning: All frequencies are zero, using default duration 20 seconds.")
+            self.logger.warning("run_trajectory_simulation: All frequencies are zero, using default duration 20 seconds.")
             duration = 20.0
         
         # Compute total number of simulation steps
         total_steps = int(duration * self.simulation_frequency)
-        print(f"[run_trajectory_simulation] Starting trajectory: {cycle_number} cycles, {duration:.2f}s, {total_steps} steps")
+        self.logger.info(f"run_trajectory_simulation: Starting trajectory: {cycle_number} cycles, {duration:.2f}s, {total_steps} steps")
         
         # Get real_time flag from config
         use_real_time = self.config["simulation_settings"].get("use_real_time", False)
@@ -641,7 +735,7 @@ class PyBulletGUI(QWidget):
         for step in range(total_steps):
             # Check if we should stop
             if self.stop_simulation_flag:
-                print("[run_trajectory_simulation] Stopped by user.")
+                self.logger.info("run_trajectory_simulation: Stopped by user.")
                 break
             
             # Current simulation time
@@ -649,19 +743,18 @@ class PyBulletGUI(QWidget):
             
             # Apply trajectory commands
             try:
-                self.simulation_core.execute_trajectory(
+                self.simulation_core.step_trajectory(
                     self.trajectory_params,
-                    t=t,
-                    real_time=use_real_time
+                    t=t
                 )
             except Exception as e:
-                print(f"[run_trajectory_simulation] trajectory tick error at step {step}: {e}")
+                self.logger.error(f"run_trajectory_simulation: trajectory tick error at step {step}: {e}")
             
             # Step the physics simulation
             try:
                 p.stepSimulation(physicsClientId=self.simulation_core.client_id)
             except Exception as e:
-                print(f"[run_trajectory_simulation] stepSimulation error at step {step}: {e}")
+                self.logger.error(f"run_trajectory_simulation: stepSimulation error at step {step}: {e}")
             
             # Real-time synchronization if enabled
             if use_real_time:
@@ -678,10 +771,10 @@ class PyBulletGUI(QWidget):
         try:
             link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
             pos = link_state[0]
-            print(f"[run_trajectory_simulation] Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
-            print(f"[run_trajectory_simulation] Final position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+            self.logger.info(f"run_trajectory_simulation: Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
+            self.logger.info(f"run_trajectory_simulation: Final position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
         except:
-            print(f"[run_trajectory_simulation] Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
+            self.logger.info(f"run_trajectory_simulation: Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
         
         # Clean up
         self.trajectory_running = False
@@ -699,7 +792,7 @@ class PyBulletGUI(QWidget):
             self.update_button_states()
 
         if self.simulation_core.robot_id is None:
-            print("Error: Failed to create robot.")
+            self.logger.error("Failed to create robot.")
             return
 
         # Set the simulation_started flag
@@ -712,7 +805,7 @@ class PyBulletGUI(QWidget):
         interval_ms = int(1000 / self.GUI_update_hz)
         self.gui_timer.start(interval_ms)
         
-        print("Simulation started successfully.")
+        self.logger.info("Simulation started successfully.")
 
     def stop_simulation(self):
         """Stop the simulation completely."""
@@ -729,7 +822,7 @@ class PyBulletGUI(QWidget):
             
         self.update_button_states()
         
-        print("Simulation stopped.")
+        self.logger.info("Simulation stopped.")
 
     def toggle_pause_simulation(self):
         """Toggle pause/resume for the simulation."""
@@ -839,7 +932,7 @@ class PyBulletGUI(QWidget):
             # Update button states after reset
             self.update_button_states()
             
-            print("Simulation reset completed successfully.")
+            self.logger.info("Simulation reset completed successfully.")
 
 
     ###########################################################################
@@ -860,7 +953,7 @@ class PyBulletGUI(QWidget):
                 "Please start the simulation first before executing a trajectory.\n\n"
                 "Click the 'Start Simulation' button to initialize the simulation."
             )
-            print("Error: Simulation not started.")
+            self.logger.error("Simulation not started.")
             return
         
         # Additional check for simulation core and robot
@@ -871,12 +964,12 @@ class PyBulletGUI(QWidget):
                 "Simulation core is not properly initialized.\n\n"
                 "Please restart the application and try again."
             )
-            print("Error: Simulation core not properly initialized.")
+            self.logger.error("Simulation core not properly initialized.")
             return
 
         # Check if already running
         if self.trajectory_running:
-            print("Trajectory is already running.")
+            self.logger.warning("Trajectory is already running.")
             return
 
         self.update_trajectory_params()
@@ -896,12 +989,12 @@ class PyBulletGUI(QWidget):
         
         # Wait for the simulation thread to finish
         if self.simulation_thread and self.simulation_thread.is_alive():
-            print("Waiting for simulation thread to stop...")
+            self.logger.info("Waiting for simulation thread to stop...")
             self.simulation_thread.join(timeout=2.0)
             if self.simulation_thread.is_alive():
-                print("Warning: Simulation thread did not stop gracefully.")
+                self.logger.warning("Simulation thread did not stop gracefully.")
         
-        print("Trajectory stopped.")
+        self.logger.info("Trajectory stopped.")
 
     def update_trajectory_params(self):
         """Update trajectory parameters from GUI inputs."""
@@ -910,7 +1003,7 @@ class PyBulletGUI(QWidget):
                 try:
                     self.trajectory_params[key] = float(self.param_inputs[key].text())
                 except ValueError:
-                    print(f"Warning: invalid input for '{key}' -> using default {self.trajectory_params[key]}")
+                    self.logger.warning(f"Invalid input for '{key}' -> using default {self.trajectory_params[key]}")
         
         # Also update PGV/PGA calculations when parameters change
         axes = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
@@ -928,19 +1021,17 @@ class PyBulletGUI(QWidget):
                 "Please start the simulation first before uploading objects.\n\n"
                 "Click the 'Start Simulation' button to initialize the simulation."
             )
-            print("Error: Simulation must be started to upload an OBJ.")
+            self.logger.error("Simulation must be started to upload an OBJ.")
             return
 
-        obj_path, _ = QFileDialog.getOpenFileName(self, "Select OBJ File", "", "OBJ Files (*.obj)")
-        if obj_path:
-            print(f"Selected OBJ file: {obj_path}")
-            dialog = EnhancedPBRLoadDialog(obj_path, self.simulation_core, parent=self)
-            result = dialog.exec_()
+        # Open the PBR dialog directly without pre-selecting a file
+        dialog = PBRLoadDialog(self.simulation_core, obj_path=None, parent=self, pedestal_half_z=self.pedestal_half_z)
+        result = dialog.exec_()
 
-            if result == QDialog.Accepted:
-                print("User confirmed final placement; the object remains in the scene.")
-            else:
-                print("User canceled, so the object was removed.")
+        if result == QDialog.Accepted:
+            self.logger.info("User confirmed final placement; the object remains in the scene.")
+        else:
+            self.logger.info("User canceled, so the object was removed.")
 
 
 ###############################################################################
