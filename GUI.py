@@ -286,6 +286,7 @@ class PyBulletGUI(QWidget):
         super().__init__()
         self.simulation_core = None
         self.simulation_thread = None
+        self.simulation_started = False  # Flag to track if simulation has been started
         self.running = False
         self.paused = False  # New state for pause functionality
         self.trajectory_running = False
@@ -318,12 +319,15 @@ class PyBulletGUI(QWidget):
         self.pgv_labels = {}  # PGV display labels
         self.pga_labels = {}  # PGA display labels
 
-        # Simulation ticking via QTimer (avoid threading segfaults on macOS GUI)
-        self.timer = QTimer(self)
-        self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.timeout.connect(self.on_tick)
-        self.tick_hz =  self.simulation_frequency  # Hz
-        self._tick_counter = 0
+        # GUI update timer (separate from simulation stepping)
+        self.gui_timer = QTimer(self)
+        self.gui_timer.setTimerType(Qt.PreciseTimer)
+        self.gui_timer.timeout.connect(self.update_gui_display)
+        
+        # Simulation thread for trajectory execution
+        self.simulation_thread = None
+        self.stop_simulation_flag = False
+        
         self.init_ui()
 
     def init_ui(self):
@@ -522,8 +526,6 @@ class PyBulletGUI(QWidget):
 
         obj_group.setLayout(obj_layout)
         main_layout.addWidget(obj_group)
-
-        self.start_position_monitor()
         
         # Initialize PGV/PGA calculations
         self.initialize_pgv_pga()
@@ -533,10 +535,6 @@ class PyBulletGUI(QWidget):
     ###########################################################################
     # Position Monitor
     ###########################################################################
-    def start_position_monitor(self):
-        """Position updates are handled inside on_tick via QTimer."""
-        pass
-
     def initialize_pgv_pga(self):
         """Initialize PGV and PGA calculations for all axes."""
         axes = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
@@ -573,61 +571,121 @@ class PyBulletGUI(QWidget):
             if axis in self.pga_labels:
                 self.pga_labels[axis].setText("0.000")
 
-    def on_tick(self):
-        """Main simulation tick on the Qt main thread. on_tick is active when 
-        the simulation is running, and it steps the physics simulation, updates
-        the trajectory if active, and refreshes the pedestal position label at
-        a reduced rate to avoid UI lag.
-        """
-        # Don't execute if simulation core doesn't exist or if paused
-        if not self.simulation_core or self.simulation_core.robot_id is None or self.paused:
+    def update_gui_display(self):
+        """Update the GUI display with current pedestal position and orientation."""
+        if not self.simulation_started or not self.simulation_core or self.simulation_core.robot_id is None:
             return
             
         try:
-            # Step physics on the correct client; running on main thread prevents GUI/Metal crashes
-            p.stepSimulation(physicsClientId=self.simulation_core.client_id)
+            link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
+            if link_state:
+                pos = link_state[0]
+                orn_quat = link_state[1]  # Quaternion orientation
+                
+                # Convert quaternion to Euler angles (roll, pitch, yaw) in radians
+                orn_euler = p.getEulerFromQuaternion(orn_quat)
+                
+                # Convert to degrees
+                roll_deg = math.degrees(orn_euler[0])
+                pitch_deg = math.degrees(orn_euler[1])
+                yaw_deg = math.degrees(orn_euler[2])
+                
+                self.position_label.setText(f"Pedestal Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
+                self.orientation_label.setText(f"Pedestal Orientation: Roll={roll_deg:.2f}°, Pitch={pitch_deg:.2f}°, Yaw={yaw_deg:.2f}°")
         except Exception as e:
-            print(f"[on_tick] stepSimulation error: {e}")
+            print(f"[update_gui_display] error: {e}")
+
+    def run_trajectory_simulation(self):
+        """
+        Execute the trajectory simulation in a dedicated loop.
+        Computes total steps based on trajectory duration and simulation frequency.
+        Uses time.sleep() for real-time mode, or runs as fast as possible otherwise.
+        """
+        if not self.simulation_started:
+            print("[run_trajectory_simulation] Error: Simulation not started.")
+            return
+            
+        if not self.simulation_core or self.simulation_core.robot_id is None:
+            print("[run_trajectory_simulation] Error: Simulation core not initialized.")
             return
         
-        # Drive trajectory (main-thread) to avoid threading crashes on macOS
-        if getattr(self, "trajectory_running", False):
+        # Calculate duration based on cycle number and the smallest non-zero frequency
+        cycle_number = float(self.trajectory_params.get("cycle_number", 1))
+        freqs = [
+            self.trajectory_params.get("freq_x", 0.0),
+            self.trajectory_params.get("freq_y", 0.0),
+            self.trajectory_params.get("freq_z", 0.0),
+            self.trajectory_params.get("freq_roll", 0.0),
+            self.trajectory_params.get("freq_pitch", 0.0),
+            self.trajectory_params.get("freq_yaw", 0.0),
+        ]
+        nonzero_freqs = [f for f in freqs if f > 0.0]
+        if nonzero_freqs:
+            min_freq = min(nonzero_freqs)
+            duration = cycle_number / min_freq
+        else:
+            print("[run_trajectory_simulation] Warning: All frequencies are zero, using default duration 20 seconds.")
+            duration = 20.0
+        
+        # Compute total number of simulation steps
+        total_steps = int(duration * self.simulation_frequency)
+        print(f"[run_trajectory_simulation] Starting trajectory: {cycle_number} cycles, {duration:.2f}s, {total_steps} steps")
+        
+        # Get real_time flag from config
+        use_real_time = self.config["simulation_settings"].get("use_real_time", False)
+        
+        # Execute simulation loop
+        start_time = time.time()
+        last_progress_report = 0
+        
+        for step in range(total_steps):
+            # Check if we should stop
+            if self.stop_simulation_flag:
+                print("[run_trajectory_simulation] Stopped by user.")
+                break
+            
+            # Current simulation time
+            t = step * self.simulation_dt
+            
+            # Apply trajectory commands
             try:
-                self.simulation_core.execute_trajectory_tick(
+                self.simulation_core.execute_trajectory(
                     self.trajectory_params,
-                    t=getattr(self, "_traj_t", 0.0),
-                    real_time=getattr(self, "_traj_realtime", False),
+                    t=t,
+                    real_time=use_real_time
                 )
-                # Advance local trajectory time
-                self._traj_t = getattr(self, "_traj_t", 0.0) + self.simulation_dt
-                if self._traj_t >= getattr(self, "_traj_duration", 20.0):
-                    self.stop_trajectory()
-                    print("[on_tick] Trajectory completed.")
             except Exception as e:
-                print(f"[on_tick] trajectory tick error: {e}")
-
-        # Update pedestal position label at a reduced rate
+                print(f"[run_trajectory_simulation] trajectory tick error at step {step}: {e}")
+            
+            # Step the physics simulation
+            try:
+                p.stepSimulation(physicsClientId=self.simulation_core.client_id)
+            except Exception as e:
+                print(f"[run_trajectory_simulation] stepSimulation error at step {step}: {e}")
+            
+            # Real-time synchronization if enabled
+            if use_real_time:
+                elapsed_time = time.time() - start_time
+                target_time = (step + 1) * self.simulation_dt
+                sleep_time = target_time - elapsed_time
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        
+        # Trajectory completed
+        elapsed_real_time = time.time() - start_time
+        
+        # Get final position
         try:
-            if (self._tick_counter % (self.simulation_frequency // self.GUI_update_hz)) == 0:  
-                link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
-                if link_state:
-                    pos = link_state[0]
-                    orn_quat = link_state[1]  # Quaternion orientation
-                    
-                    # Convert quaternion to Euler angles (roll, pitch, yaw) in radians
-                    orn_euler = p.getEulerFromQuaternion(orn_quat)
-                    
-                    # Convert to degrees
-                    roll_deg = math.degrees(orn_euler[0])
-                    pitch_deg = math.degrees(orn_euler[1])
-                    yaw_deg = math.degrees(orn_euler[2])
-                    
-                    self.position_label.setText(f"Pedestal Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
-                    self.orientation_label.setText(f"Pedestal Orientation: Roll={roll_deg:.2f}°, Pitch={pitch_deg:.2f}°, Yaw={yaw_deg:.2f}°")
-        except Exception:
-            pass
-        finally:
-            self._tick_counter += 1
+            link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
+            pos = link_state[0]
+            print(f"[run_trajectory_simulation] Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
+            print(f"[run_trajectory_simulation] Final position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+        except:
+            print(f"[run_trajectory_simulation] Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
+        
+        # Clean up
+        self.trajectory_running = False
+        self.trajectory_button.setText("Execute Trajectory")
 
     ###########################################################################
     # Simulation
@@ -644,26 +702,34 @@ class PyBulletGUI(QWidget):
             print("Error: Failed to create robot.")
             return
 
+        # Set the simulation_started flag
+        self.simulation_started = True
         self.running = True
         self.paused = False
         self.update_button_states()
 
-        # Start Qt timer
-        interval_ms = int(1000 / self.tick_hz)
-        self.timer.start(interval_ms)
+        # Start GUI update timer (10 Hz for display updates)
+        interval_ms = int(1000 / self.GUI_update_hz)
+        self.gui_timer.start(interval_ms)
+        
+        print("Simulation started successfully.")
 
     def stop_simulation(self):
         """Stop the simulation completely."""
+        # Turn off the simulation_started flag
+        self.simulation_started = False
         self.running = False
         self.paused = False
-        if self.timer.isActive():
-            self.timer.stop()
+        if self.gui_timer.isActive():
+            self.gui_timer.stop()
         
         # Stop trajectory if running
         if self.trajectory_running:
             self.stop_trajectory()
             
         self.update_button_states()
+        
+        print("Simulation stopped.")
 
     def toggle_pause_simulation(self):
         """Toggle pause/resume for the simulation."""
@@ -673,61 +739,57 @@ class PyBulletGUI(QWidget):
         if self.paused:
             # Resume simulation
             self.paused = False
-            if not self.timer.isActive():
-                interval_ms = int(1000 / self.tick_hz)
-                self.timer.start(interval_ms)
+            if not self.gui_timer.isActive():
+                interval_ms = int(1000 / self.GUI_update_hz)
+                self.gui_timer.start(interval_ms)
         else:
             # Pause simulation
             self.paused = True
-            if self.timer.isActive():
-                self.timer.stop()
+            if self.gui_timer.isActive():
+                self.gui_timer.stop()
                 
         self.update_button_states()
 
     def update_button_states(self):
         """Update button enabled/disabled states and text based on current simulation state."""
-        if self.simulation_core is None:
-            # No simulation created yet
+        if self.simulation_core is None or not self.simulation_started:
+            # No simulation created yet or not started
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.pause_button.setEnabled(False)
-            self.reset_button.setEnabled(False)
+            self.reset_button.setEnabled(self.simulation_core is not None)
             self.pause_button.setText("Pause Simulation")
-        elif self.running and not self.paused:
+        elif self.simulation_started and self.running and not self.paused:
             # Simulation is running
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(True)
             self.pause_button.setEnabled(True)
             self.reset_button.setEnabled(False)
             self.pause_button.setText("Pause Simulation")
-        elif self.running and self.paused:
+        elif self.simulation_started and self.running and self.paused:
             # Simulation is paused
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(True)
             self.pause_button.setEnabled(True)
             self.reset_button.setEnabled(False)
             self.pause_button.setText("Resume Simulation")
-        else:
-            # Simulation is stopped but core exists
+        elif self.simulation_started and not self.running:
+            # Simulation was started but now stopped
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.pause_button.setEnabled(False)
             self.reset_button.setEnabled(True)
             self.pause_button.setText("Pause Simulation")
 
-    def run_simulation(self):
-        """Unused: simulation is advanced by on_tick() via QTimer on the main thread."""
-        pass
-
     def reset_simulation(self):
         """Resets PyBullet simulation and re-applies all settings."""
         # Check if simulation is currently running or paused
-        if self.running:
+        if self.running or self.simulation_started:
             # Show error dialog prompting user to stop simulation first
             msg = QMessageBox()
             msg.setIcon(QMessageBox.Warning)
             msg.setWindowTitle("Cannot Reset Simulation")
-            msg.setText("Simulation is currently running or paused.")
+            msg.setText("Simulation is currently running or has been started.")
             msg.setInformativeText("Please stop the simulation before resetting.")
             msg.setDetailedText(
                 "To reset the simulation:\n"
@@ -771,6 +833,9 @@ class PyBulletGUI(QWidget):
             # Re-create your robot (and environment if needed)
             self.simulation_core.create_robot()
             
+            # Reset the simulation_started flag since we're creating a fresh simulation
+            self.simulation_started = False
+            
             # Update button states after reset
             self.update_button_states()
             
@@ -787,54 +852,56 @@ class PyBulletGUI(QWidget):
             self.stop_trajectory()
 
     def start_trajectory(self):
+        # Check if simulation has been started using the flag
+        if not self.simulation_started:
+            QMessageBox.warning(
+                self,
+                "Simulation Not Started",
+                "Please start the simulation first before executing a trajectory.\n\n"
+                "Click the 'Start Simulation' button to initialize the simulation."
+            )
+            print("Error: Simulation not started.")
+            return
+        
+        # Additional check for simulation core and robot
         if not self.simulation_core or not self.simulation_core.robot_id:
-            print("Error: Simulation not running.")
+            QMessageBox.warning(
+                self,
+                "Simulation Error",
+                "Simulation core is not properly initialized.\n\n"
+                "Please restart the application and try again."
+            )
+            print("Error: Simulation core not properly initialized.")
+            return
+
+        # Check if already running
+        if self.trajectory_running:
+            print("Trajectory is already running.")
             return
 
         self.update_trajectory_params()
         self.trajectory_running = True
+        self.stop_simulation_flag = False
         self.trajectory_button.setText("Stop Trajectory")
 
-        # Per-trajectory state used by on_tick()
-        self._traj_t = 0.0
-        
-        # Calculate duration based on cycle number and the smallest non-zero frequency (slowest axis)
-        cycle_number = float(self.trajectory_params.get("cycle_number", 10))
-        freqs = [
-            self.trajectory_params.get("freq_x", 0.0),
-            self.trajectory_params.get("freq_y", 0.0),
-            self.trajectory_params.get("freq_z", 0.0),
-            self.trajectory_params.get("freq_roll", 0.0),
-            self.trajectory_params.get("freq_pitch", 0.0),
-            self.trajectory_params.get("freq_yaw", 0.0),
-        ]
-        # Filter out zeros to avoid division by zero and pick the smallest non-zero frequency
-        nonzero_freqs = [f for f in freqs if f > 0.0]
-        if nonzero_freqs:
-            min_freq = min(nonzero_freqs)
-            self._traj_duration = cycle_number / min_freq
-        else:
-            # Fallback if all frequencies are zero
-            self._traj_duration = 20.0
-            
-        self._traj_realtime = False  # Always offline mode (real-time checkbox removed)
-        print(f"Starting trajectory for {cycle_number} cycles, duration: {self._traj_duration:.2f}s")
+        # Start the simulation in a separate thread
+        self.simulation_thread = threading.Thread(target=self.run_trajectory_simulation, daemon=True)
+        self.simulation_thread.start()
 
     def stop_trajectory(self):
+        """Stop the trajectory execution."""
+        self.stop_simulation_flag = True
         self.trajectory_running = False
         self.trajectory_button.setText("Execute Trajectory")
-
-    def run_trajectory(self):
-        if not self.simulation_core or not self.simulation_core.robot_id:
-            print("Error: SimulationCore is not initialized.")
-            return
-
-        print("Executing trajectory in offline mode.")
-        # Note: Trajectory execution is now handled by execute_trajectory_tick in on_tick()
-        # This method is kept for compatibility but actual execution happens via QTimer
-
-        self.trajectory_running = False
-        self.trajectory_button.setText("Execute Trajectory")
+        
+        # Wait for the simulation thread to finish
+        if self.simulation_thread and self.simulation_thread.is_alive():
+            print("Waiting for simulation thread to stop...")
+            self.simulation_thread.join(timeout=2.0)
+            if self.simulation_thread.is_alive():
+                print("Warning: Simulation thread did not stop gracefully.")
+        
+        print("Trajectory stopped.")
 
     def update_trajectory_params(self):
         """Update trajectory parameters from GUI inputs."""
@@ -854,8 +921,14 @@ class PyBulletGUI(QWidget):
     # Upload OBJ with Live Preview
     ###########################################################################
     def upload_obj(self):
-        if not self.simulation_core or self.simulation_core.robot_id is None:
-            print("Error: Simulation must be running to upload an OBJ.")
+        if not self.simulation_started or not self.simulation_core or self.simulation_core.robot_id is None:
+            QMessageBox.warning(
+                self,
+                "Simulation Not Started",
+                "Please start the simulation first before uploading objects.\n\n"
+                "Click the 'Start Simulation' button to initialize the simulation."
+            )
+            print("Error: Simulation must be started to upload an OBJ.")
             return
 
         obj_path, _ = QFileDialog.getOpenFileName(self, "Select OBJ File", "", "OBJ Files (*.obj)")

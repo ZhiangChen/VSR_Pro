@@ -186,7 +186,7 @@ class SimulationCore:
         
         # Calculate maximum forces for prismatic joints
         # F = m * a_max + safety_factor * m * g (to overcome gravity and provide margin)
-        safety_factor = 1.5  # 50% safety margin
+        safety_factor = 3  # 200% safety margin
         
         max_force_x = pedestal_mass * (max_acc_x + safety_factor * gravity_magnitude)
         max_force_y = pedestal_mass * (max_acc_y + safety_factor * gravity_magnitude)
@@ -237,7 +237,7 @@ class SimulationCore:
             # Calculate reasonable velocity limit based on acceleration
             # v_max = sqrt(2 * a_max * range) or a more conservative approach
             joint_range = upper_limit - lower_limit
-            max_velocity = min(10.0, max_acceleration * 0.5)  # Conservative velocity limit
+            max_velocity = min(10.0, max_acceleration)  # Conservative velocity limit
             
             p.changeDynamics(
                 self.robot_id,
@@ -258,7 +258,7 @@ class SimulationCore:
         lower_limit = spherical_config["limit"][0]
         upper_limit = spherical_config["limit"][1]
         max_angular_acceleration = spherical_config["max_acceleration"]
-        max_angular_velocity = max_angular_acceleration * 0.1  # Conservative velocity limit
+        max_angular_velocity = max_angular_acceleration   
         max_torque = self.max_efforts["spherical"]
         
         # Set spherical joint limits - PyBullet spherical joints support position limits
@@ -292,12 +292,16 @@ class SimulationCore:
             except Exception as e2:
                 print(f"Error: Could not set spherical joint properties: {e2}")
 
-    def execute_trajectory_tick(self, params, t: float, real_time: bool = False):
+    def execute_trajectory(self, params, t: float, real_time: bool = False):
         """
-        Apply one incremental trajectory command at time t using JOINT CONTROL,
-        consistent with execute_trajectory(): joints 0-2 are prismatic (x,y,z),
-        joint 3 is spherical (roll, pitch, yaw via quaternion).
-        This MUST NOT call stepSimulation() or sleep; the GUI (QTimer) advances the world.
+        Apply one incremental trajectory command at time t using VELOCITY CONTROL.
+        Joints 0-2 are prismatic (x,y,z), joint 3 is spherical (roll, pitch, yaw).
+        
+        Position: x(t) = amp * (1 - cos(2πft))
+        Velocity: v(t) = dx/dt = amp * 2πf * sin(2πft)
+        
+        Note: For spherical joints, PyBullet doesn't support VELOCITY_CONTROL with 
+        setJointMotorControlMultiDof, so we use TORQUE_CONTROL with computed torques.
         """
         # Read params
         amp_x = params.get("amp_x", 0.0);     freq_x = params.get("freq_x", 0.0)
@@ -307,38 +311,60 @@ class SimulationCore:
         amp_pitch = params.get("amp_pitch", 0.0); freq_pitch = params.get("freq_pitch", 0.0)
         amp_yaw   = params.get("amp_yaw", 0.0);   freq_yaw   = params.get("freq_yaw", 0.0)
 
-        # Desired joint positions at time t
-        x = amp_x - amp_x * math.cos(2 * math.pi * freq_x * t)
-        y = amp_y - amp_y * math.cos(2 * math.pi * freq_y * t)
-        z = amp_z - amp_z * math.cos(2 * math.pi * freq_z * t)
-        roll  = amp_roll  - amp_roll  * math.cos(2 * math.pi * freq_roll  * t)
-        pitch = amp_pitch - amp_pitch * math.cos(2 * math.pi * freq_pitch * t)
-        yaw   = amp_yaw   - amp_yaw   * math.cos(2 * math.pi * freq_yaw   * t)
+        # Calculate velocities at time t
+        # Ground motion: x(t) = amp * (1 - cos(2πft))
+        # Derivative: v(t) = amp * 2πf * sin(2πft)
+        two_pi = 2 * math.pi
+        
+        vx = amp_x * two_pi * freq_x * math.sin(two_pi * freq_x * t)
+        vy = amp_y * two_pi * freq_y * math.sin(two_pi * freq_y * t)
+        vz = amp_z * two_pi * freq_z * math.sin(two_pi * freq_z * t)
+        vroll  = amp_roll  * two_pi * freq_roll  * math.sin(two_pi * freq_roll  * t)
+        vpitch = amp_pitch * two_pi * freq_pitch * math.sin(two_pi * freq_pitch * t)
+        vyaw   = amp_yaw   * two_pi * freq_yaw   * math.sin(two_pi * freq_yaw   * t)
 
         try:
-            
-            # Prismatic joints (indices 0,1,2): X, Y, Z
-            p.setJointMotorControl2(self.robot_id, 0, p.POSITION_CONTROL,
-                                    targetPosition=float(x), 
+            # Prismatic joints (indices 0,1,2): X, Y, Z using VELOCITY_CONTROL
+            p.setJointMotorControl2(self.robot_id, 0, p.VELOCITY_CONTROL,
+                                    targetVelocity=float(vx), 
                                     force=self.max_efforts["prismatic_x"],
                                     physicsClientId=self.client_id)
-            p.setJointMotorControl2(self.robot_id, 1, p.POSITION_CONTROL,
-                                    targetPosition=float(y),
-                                    force=self.max_efforts["prismatic_y"], 
+            p.setJointMotorControl2(self.robot_id, 1, p.VELOCITY_CONTROL,
+                                    targetVelocity=float(vy),
+                                    force=self.max_efforts["prismatic_y"],
                                     physicsClientId=self.client_id)
-            p.setJointMotorControl2(self.robot_id, 2, p.POSITION_CONTROL,
-                                    targetPosition=float(z),
+            p.setJointMotorControl2(self.robot_id, 2, p.VELOCITY_CONTROL,
+                                    targetVelocity=float(vz),
                                     force=self.max_efforts["prismatic_z"],
                                     physicsClientId=self.client_id)
 
-            # Spherical joint (index 3): orientation from Euler -> quaternion
-            target_orientation = p.getQuaternionFromEuler([roll, pitch, yaw])
-            p.setJointMotorControlMultiDof(self.robot_id, 3, p.POSITION_CONTROL,
-                                           targetPosition=target_orientation,
-                                           force=[self.max_efforts["spherical"]] * 3,  # Apply torque limit to all rotation axes
-                                           physicsClientId=self.client_id)
+            # Spherical joint (index 3): Use TORQUE_CONTROL with PD controller
+            # Get current angular velocity
+            joint_state = p.getJointStateMultiDof(self.robot_id, 3, physicsClientId=self.client_id)
+            current_ang_vel = joint_state[1]  # [wx, wy, wz]
+            
+            # PD controller: torque = Kp * (target_vel - current_vel) + Kd * 0
+            # Simple proportional control for velocity tracking
+            Kp = self.max_efforts["spherical"] * 10.0  # Proportional gain
+            target_ang_vel = [vroll, vpitch, vyaw]
+            
+            torques = [
+                Kp * (target_ang_vel[i] - current_ang_vel[i]) 
+                for i in range(3)
+            ]
+            
+            # Clamp torques to max effort
+            max_torque = self.max_efforts["spherical"]
+            torques = [max(-max_torque, min(max_torque, t)) for t in torques]
+            
+            p.setJointMotorControlMultiDof(
+                self.robot_id, 3, 
+                p.TORQUE_CONTROL,
+                force=torques,
+                physicsClientId=self.client_id
+            )
         except Exception as e:
-            print(f"[SimulationCore.execute_trajectory_tick] error: {e}")
+            print(f"[SimulationCore.execute_trajectory] error: {e}")
 
 
     def spawn_obj_on_pedestal(

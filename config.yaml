@@ -2,7 +2,7 @@ simulation_settings:
   gravity: [0, 0, -9.81]  # Gravity vector
   simulation_frequency: 500  # Simulation frequency in Hz
   enable_graphics: True        # Enable PyBullet GUI
-  use_real_time: False    # Use real-time simulation
+  use_real_time: True    # Use real-time simulation
 
 structure:
   world_box:
@@ -32,16 +32,16 @@ dynamics:
 
 joints:
   prismatic_x:
-    limit: [-5.0, 5.0]  # Min and max movement range
-    max_acceleration: 20.0  # Maximum acceleration in m/s²
+    limit: [-10.0, 10.0]  # Min and max movement range
+    max_acceleration: 40.0  # Maximum acceleration in m/s²
 
   prismatic_y:
     limit: [-5.0, 5.0]
-    max_acceleration: 20.0  # Maximum acceleration in m/s²
+    max_acceleration: 40.0  # Maximum acceleration in m/s²
 
   prismatic_z:
     limit: [-5.0, 5.0]  # Cannot go below ground
-    max_acceleration: 20.0  # Maximum acceleration in m/s²
+    max_acceleration: 40.0  # Maximum acceleration in m/s²
 
   spherical_joint:
     limit: [-3.14159, 3.14159]  # Full rotation (-π to π radians)

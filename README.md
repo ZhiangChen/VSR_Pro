@@ -61,6 +61,8 @@ VSR_Pro/
    vsr_env\Scripts\activate     # On Windows
    ```
 
+   For the PowerShell error, run before activating the virtual environment `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
+
 3. **Install required libraries:**
    ```bash
    pip install pybullet
@@ -102,27 +104,49 @@ The main interface provides the following functionality:
 
 Modify `config.yaml` to customize:
 
-- **Simulation Settings**: Time step, gravity, GUI enable/disable
+- **Simulation Settings**: Time step, gravity, GUI enable/disable, real-time mode
 - **Structural Parameters**: Dimensions and mass properties of shake table components
 - **Joint Configuration**: Movement limits, force constraints, and joint types
 - **Dynamics Properties**: Friction, restitution, contact parameters
 - **Visual Settings**: Colors and appearance of simulation elements
+
+### Simulation Modes
+
+VSR Pro supports two execution modes controlled by the `use_real_time` flag in `config.yaml`:
+
+#### Non-Real-Time Mode (Fast Execution)
+```yaml
+simulation_settings:
+  use_real_time: False  # Run as fast as possible
+  simulation_frequency: 500  # Hz
+```
+- **Performance**: Runs 50-60x faster than real-time
+- **Use case**: Rapid testing, batch simulations, data generation
+- **Example**: 5-second trajectory completes in ~0.08 seconds
+
+#### Real-Time Mode (Synchronized Execution)
+```yaml
+simulation_settings:
+  use_real_time: True  # Synchronize with wall clock
+  simulation_frequency: 500  # Hz
+```
+- **Performance**: 1:1 synchronization with wall time
+- **Use case**: Visualization, hardware-in-the-loop testing, real-time control
+- **Example**: 5-second trajectory takes exactly 5 seconds
 
 ### Example Configuration
 
 ```yaml
 simulation_settings:
   gravity: [0, 0, -9.81]
-  time_step: 0.01
-  enable_gui: True
-  use_real_time: False
+  simulation_frequency: 500  # Simulation frequency in Hz
+  enable_graphics: True
+  use_real_time: False  # false = fast mode, true = real-time mode
 
 joints:
   prismatic_x:
-    type: "prismatic"
-    axis: [1, 0, 0]
-    limit: [-1.0, 1.0]
-    max_force: 5e8
+    limit: [-5.0, 5.0]
+    max_acceleration: 20.0
 ```
 
 ## Development
