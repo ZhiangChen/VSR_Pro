@@ -6,6 +6,8 @@ import threading
 import yaml
 import logging
 import os
+from datetime import datetime
+import numpy as np
 
 import pybullet as p
 
@@ -288,6 +290,10 @@ class PBRLoadDialog(QDialog):
             )
             if hasattr(self.parent(), 'logger'):
                 self.parent().logger.info(f"[GUI] Created new object with ID={self.preview_obj_id}")
+            
+            # Register object for data recording
+            if hasattr(self.parent(), 'register_pbr_object'):
+                self.parent().register_pbr_object(self.preview_obj_id)
         else:
             # Already spawned => update transform & dynamics
             # 1) compute final position based on pedestal
@@ -348,7 +354,10 @@ class PyBulletGUI(QWidget):
         self.running = False
         self.paused = False  # New state for pause functionality
         self.trajectory_running = False
-        self.trajectory_thread = None
+        self.stop_simulation_flag = False
+        
+        # Last known pedestal position for position control
+        self.last_pedestal_position = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # [x, y, z, roll, pitch, yaw]
 
         # load config
         yaml_path = "config.yaml"
@@ -383,9 +392,13 @@ class PyBulletGUI(QWidget):
         self.gui_timer.setTimerType(Qt.PreciseTimer)
         self.gui_timer.timeout.connect(self.update_gui_display)
         
-        # Simulation thread for trajectory execution
-        self.simulation_thread = None
-        self.stop_simulation_flag = False
+        # Data recording attributes
+        self.recording_active = False
+        self.recorded_times = []
+        self.recorded_pedestal_poses = []
+        self.recorded_pbr_poses = {}  # Dictionary: object_id -> list of poses
+        self.pbr_object_ids = set()  # Track all PBR objects spawned
+        self.recording_start_time = None
         
         # Setup logging
         log_file_path = self.config["simulation_settings"].get("log_file", "data/simulation.log")
@@ -679,6 +692,9 @@ class PyBulletGUI(QWidget):
                 # Convert quaternion to Euler angles (roll, pitch, yaw) in radians
                 orn_euler = p.getEulerFromQuaternion(orn_quat)
                 
+                # Store current position for position control when trajectory is not running
+                self.last_pedestal_position = [pos[0], pos[1], pos[2], orn_euler[0], orn_euler[1], orn_euler[2]]
+                
                 # Convert to degrees
                 roll_deg = math.degrees(orn_euler[0])
                 pitch_deg = math.degrees(orn_euler[1])
@@ -689,96 +705,274 @@ class PyBulletGUI(QWidget):
         except Exception as e:
             self.logger.error(f"update_gui_display error: {e}")
 
-    def run_trajectory_simulation(self):
-        """
-        Execute the trajectory simulation in a dedicated loop.
-        Computes total steps based on trajectory duration and simulation frequency.
-        Uses time.sleep() for real-time mode, or runs as fast as possible otherwise.
-        """
-        if not self.simulation_started:
-            self.logger.error("run_trajectory_simulation: Simulation not started.")
+    ###########################################################################
+    # Data Recording
+    ###########################################################################
+    def start_recording(self):
+        """Start recording trajectory data."""
+        self.recording_active = True
+        self.recorded_times = []
+        self.recorded_pedestal_poses = []
+        self.recorded_pbr_poses = {}
+        
+        # Initialize arrays for each tracked PBR object
+        for obj_id in self.pbr_object_ids:
+            self.recorded_pbr_poses[obj_id] = []
+        
+        self.recording_start_time = None
+        self.logger.info("Data recording started.")
+
+    def stop_recording(self):
+        """Stop recording and save data to file."""
+        if not self.recording_active:
             return
             
-        if not self.simulation_core or self.simulation_core.robot_id is None:
-            self.logger.error("run_trajectory_simulation: Simulation core not initialized.")
+        self.recording_active = False
+        self.logger.info("Data recording stopped.")
+        
+        # Save recorded data
+        if len(self.recorded_times) > 0:
+            self.save_recording_data()
+        else:
+            self.logger.warning("No data recorded during trajectory run.")
+
+    def record_current_poses(self, simulation_time):
+        """
+        Record current poses of pedestal and all PBR objects.
+        
+        :param simulation_time: Current simulation time in seconds
+        """
+        if not self.recording_active or not self.simulation_core:
             return
         
-        # Calculate duration based on cycle number and the smallest non-zero frequency
-        cycle_number = float(self.trajectory_params.get("cycle_number", 1))
-        freqs = [
-            self.trajectory_params.get("freq_x", 0.0),
-            self.trajectory_params.get("freq_y", 0.0),
-            self.trajectory_params.get("freq_z", 0.0),
-            self.trajectory_params.get("freq_roll", 0.0),
-            self.trajectory_params.get("freq_pitch", 0.0),
-            self.trajectory_params.get("freq_yaw", 0.0),
-        ]
-        nonzero_freqs = [f for f in freqs if f > 0.0]
-        if nonzero_freqs:
-            min_freq = min(nonzero_freqs)
-            duration = cycle_number / min_freq
-        else:
-            self.logger.warning("run_trajectory_simulation: All frequencies are zero, using default duration 20 seconds.")
-            duration = 20.0
+        try:
+            # Record timestamp
+            self.recorded_times.append(simulation_time)
+            
+            # Record pedestal pose (link 3)
+            link_state = p.getLinkState(
+                self.simulation_core.robot_id, 3,
+                physicsClientId=self.simulation_core.client_id
+            )
+            pos = link_state[0]
+            orn_quat = link_state[1]
+            orn_euler = p.getEulerFromQuaternion(orn_quat)
+            
+            # Store as [x, y, z, roll, pitch, yaw]
+            pedestal_pose = [pos[0], pos[1], pos[2], orn_euler[0], orn_euler[1], orn_euler[2]]
+            self.recorded_pedestal_poses.append(pedestal_pose)
+            
+            # Record PBR object poses
+            for obj_id in self.pbr_object_ids:
+                try:
+                    obj_pos, obj_orn = p.getBasePositionAndOrientation(
+                        obj_id,
+                        physicsClientId=self.simulation_core.client_id
+                    )
+                    obj_euler = p.getEulerFromQuaternion(obj_orn)
+                    obj_pose = [obj_pos[0], obj_pos[1], obj_pos[2], 
+                               obj_euler[0], obj_euler[1], obj_euler[2]]
+                    
+                    if obj_id not in self.recorded_pbr_poses:
+                        self.recorded_pbr_poses[obj_id] = []
+                    self.recorded_pbr_poses[obj_id].append(obj_pose)
+                except Exception as e:
+                    self.logger.error(f"Error recording pose for object {obj_id}: {e}")
+                    
+        except Exception as e:
+            self.logger.error(f"record_current_poses error: {e}")
+
+    def save_recording_data(self):
+        """Save recorded data to NPZ file with timestamp."""
+        try:
+            # Create data directory if it doesn't exist
+            data_dir = "data"
+            if not os.path.exists(data_dir):
+                os.makedirs(data_dir)
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(data_dir, f"run_{timestamp}.npz")
+            
+            # Convert lists to numpy arrays
+            times_array = np.array(self.recorded_times)
+            pedestal_poses_array = np.array(self.recorded_pedestal_poses)
+            
+            # Prepare data dictionary
+            data_dict = {
+                'times': times_array,
+                'pedestal_poses': pedestal_poses_array,
+                'pedestal_pose_description': 'Each row: [x, y, z, roll, pitch, yaw]'
+            }
+            
+            # Add PBR object data
+            for obj_id, poses_list in self.recorded_pbr_poses.items():
+                if len(poses_list) > 0:
+                    poses_array = np.array(poses_list)
+                    data_dict[f'pbr_object_{obj_id}_poses'] = poses_array
+            
+            # Add metadata
+            data_dict['num_samples'] = len(times_array)
+            data_dict['num_pbr_objects'] = len(self.recorded_pbr_poses)
+            data_dict['pbr_object_ids'] = np.array(list(self.pbr_object_ids))
+            
+            # Save to file
+            np.savez(filename, **data_dict)
+            
+            self.logger.info(f"Recorded data saved to {filename}")
+            self.logger.info(f"Total samples: {len(times_array)}, Duration: {times_array[-1]:.2f}s")
+            self.logger.info(f"PBR objects tracked: {len(self.recorded_pbr_poses)}")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving recording data: {e}")
+
+    def register_pbr_object(self, object_id):
+        """
+        Register a PBR object for tracking during recording.
         
-        # Compute total number of simulation steps
-        total_steps = int(duration * self.simulation_frequency)
-        self.logger.info(f"run_trajectory_simulation: Starting trajectory: {cycle_number} cycles, {duration:.2f}s, {total_steps} steps")
+        :param object_id: PyBullet body ID of the object
+        """
+        if object_id is not None:
+            self.pbr_object_ids.add(object_id)
+            self.logger.info(f"Registered PBR object {object_id} for tracking.")
+
+    def run_simulation_loop(self):
+        """
+        Main simulation loop that runs continuously in a separate thread.
+        Steps the simulation and either executes trajectory or maintains position.
+        """
+        if not self.simulation_core or self.simulation_core.robot_id is None:
+            self.logger.error("run_simulation_loop: Simulation core not initialized.")
+            return
+        
+        self.logger.info("run_simulation_loop: Simulation loop started.")
+        
+        # Read initial pedestal position to avoid forcing it to [0,0,0]
+        try:
+            link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
+            pos = link_state[0]
+            orn_quat = link_state[1]
+            orn_euler = p.getEulerFromQuaternion(orn_quat)
+            self.last_pedestal_position = [pos[0], pos[1], pos[2], orn_euler[0], orn_euler[1], orn_euler[2]]
+            self.logger.info(f"run_simulation_loop: Initial pedestal position: {self.last_pedestal_position}")
+        except Exception as e:
+            self.logger.error(f"run_simulation_loop: Error reading initial position: {e}")
         
         # Get real_time flag from config
         use_real_time = self.config["simulation_settings"].get("use_real_time", False)
         
-        # Execute simulation loop
+        # Initialize timing
         start_time = time.time()
-        last_progress_report = 0
+        step_count = 0
+        trajectory_start_time = None
+        trajectory_start_step = 0
         
-        for step in range(total_steps):
-            # Check if we should stop
-            if self.stop_simulation_flag:
-                self.logger.info("run_trajectory_simulation: Stopped by user.")
-                break
+        while not self.stop_simulation_flag:
+            # Skip simulation stepping if paused
+            if self.paused:
+                time.sleep(0.01)  # Small sleep to prevent busy waiting
+                continue
             
-            # Current simulation time
-            t = step * self.simulation_dt
+            # Calculate current time based on mode:
+            # - Real-time mode: use wall-clock time
+            # - Non-real-time mode: use simulation time (step_count * dt)
+            if use_real_time:
+                current_time = time.time() - start_time
+            else:
+                current_time = step_count * self.simulation_dt
             
-            # Apply trajectory commands
-            try:
-                self.simulation_core.step_trajectory(
-                    self.trajectory_params,
-                    t=t
-                )
-            except Exception as e:
-                self.logger.error(f"run_trajectory_simulation: trajectory tick error at step {step}: {e}")
+            if self.trajectory_running:
+                # Calculate trajectory duration if just started
+                if trajectory_start_time is None:
+                    trajectory_start_time = current_time
+                    trajectory_start_step = step_count
+                    
+                    # Calculate duration based on cycle number and smallest non-zero frequency
+                    cycle_number = float(self.trajectory_params.get("cycle_number", 1))
+                    freqs = [
+                        self.trajectory_params.get("freq_x", 0.0),
+                        self.trajectory_params.get("freq_y", 0.0),
+                        self.trajectory_params.get("freq_z", 0.0),
+                        self.trajectory_params.get("freq_roll", 0.0),
+                        self.trajectory_params.get("freq_pitch", 0.0),
+                        self.trajectory_params.get("freq_yaw", 0.0),
+                    ]
+                    nonzero_freqs = [f for f in freqs if f > 0.0]
+                    if nonzero_freqs:
+                        min_freq = min(nonzero_freqs)
+                        self.trajectory_duration = cycle_number / min_freq
+                    else:
+                        self.logger.warning("run_simulation_loop: All frequencies are zero, using default duration 20 seconds.")
+                        self.trajectory_duration = 20.0
+                    
+                    total_steps = int(self.trajectory_duration * self.simulation_frequency)
+                    self.logger.info(f"run_simulation_loop: Starting trajectory: {cycle_number} cycles, {self.trajectory_duration:.2f}s, {total_steps} steps")
+                    
+                    # Start data recording
+                    self.start_recording()
+                
+                # Calculate time since trajectory started (in simulation time)
+                t = current_time - trajectory_start_time
+                
+                # Check if trajectory duration is exceeded
+                if t >= self.trajectory_duration:
+                    elapsed_steps = step_count - trajectory_start_step
+                    self.logger.info(f"run_simulation_loop: Trajectory completed in {t:.2f}s ({elapsed_steps} steps)")
+                    
+                    # Get final position
+                    try:
+                        link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
+                        pos = link_state[0]
+                        self.logger.info(f"run_simulation_loop: Final position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+                    except Exception as e:
+                        self.logger.error(f"run_simulation_loop: Error getting final position: {e}")
+                    
+                    # Stop trajectory and recording
+                    self.trajectory_running = False
+                    trajectory_start_time = None
+                    self.trajectory_button.setText("Execute Trajectory")
+                    
+                    # Stop data recording and save
+                    self.stop_recording()
+                    continue
+                
+                # Execute trajectory step
+                try:
+                    self.simulation_core.step_trajectory(
+                        self.trajectory_params,
+                        t=t
+                    )
+                except Exception as e:
+                    self.logger.error(f"run_simulation_loop: trajectory step error at t={t:.3f}: {e}")
+                
+                # Record current poses during trajectory execution
+                self.record_current_poses(t)
+            else:
+                # No trajectory running - hold current position with zero velocity control
+                try:
+                    self.simulation_core.hold_pedestal_position()
+                except Exception as e:
+                    self.logger.error(f"run_simulation_loop: hold position error: {e}")
+                
+                # Reset trajectory timing
+                trajectory_start_time = None
             
             # Step the physics simulation
             try:
                 p.stepSimulation(physicsClientId=self.simulation_core.client_id)
+                step_count += 1
             except Exception as e:
-                self.logger.error(f"run_trajectory_simulation: stepSimulation error at step {step}: {e}")
+                self.logger.error(f"run_simulation_loop: stepSimulation error at step {step_count}: {e}")
             
             # Real-time synchronization if enabled
             if use_real_time:
                 elapsed_time = time.time() - start_time
-                target_time = (step + 1) * self.simulation_dt
+                target_time = (step_count) * self.simulation_dt
                 sleep_time = target_time - elapsed_time
                 if sleep_time > 0:
                     time.sleep(sleep_time)
         
-        # Trajectory completed
-        elapsed_real_time = time.time() - start_time
-        
-        # Get final position
-        try:
-            link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
-            pos = link_state[0]
-            self.logger.info(f"run_trajectory_simulation: Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
-            self.logger.info(f"run_trajectory_simulation: Final position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
-        except:
-            self.logger.info(f"run_trajectory_simulation: Trajectory completed in {elapsed_real_time:.2f}s (simulated: {duration:.2f}s)")
-        
-        # Clean up
-        self.trajectory_running = False
-        self.trajectory_button.setText("Execute Trajectory")
+        self.logger.info("run_simulation_loop: Simulation loop stopped.")
 
     ###########################################################################
     # Simulation
@@ -799,26 +993,42 @@ class PyBulletGUI(QWidget):
         self.simulation_started = True
         self.running = True
         self.paused = False
+        self.stop_simulation_flag = False
         self.update_button_states()
 
-        # Start GUI update timer (10 Hz for display updates)
+        # Start GUI update timer (for display updates)
         interval_ms = int(1000 / self.GUI_update_hz)
         self.gui_timer.start(interval_ms)
+        
+        # Start the simulation loop in a separate thread
+        self.simulation_thread = threading.Thread(target=self.run_simulation_loop, daemon=True)
+        self.simulation_thread.start()
         
         self.logger.info("Simulation started successfully.")
 
     def stop_simulation(self):
         """Stop the simulation completely."""
+        # Stop trajectory if running
+        if self.trajectory_running:
+            self.trajectory_running = False
+            self.trajectory_button.setText("Execute Trajectory")
+        
+        # Signal simulation thread to stop
+        self.stop_simulation_flag = True
+        
+        # Wait for simulation thread to finish
+        if self.simulation_thread and self.simulation_thread.is_alive():
+            self.logger.info("Waiting for simulation thread to stop...")
+            self.simulation_thread.join(timeout=2.0)
+            if self.simulation_thread.is_alive():
+                self.logger.warning("Simulation thread did not stop gracefully.")
+        
         # Turn off the simulation_started flag
         self.simulation_started = False
         self.running = False
         self.paused = False
         if self.gui_timer.isActive():
             self.gui_timer.stop()
-        
-        # Stop trajectory if running
-        if self.trajectory_running:
-            self.stop_trajectory()
             
         self.update_button_states()
         
@@ -974,26 +1184,13 @@ class PyBulletGUI(QWidget):
 
         self.update_trajectory_params()
         self.trajectory_running = True
-        self.stop_simulation_flag = False
         self.trajectory_button.setText("Stop Trajectory")
-
-        # Start the simulation in a separate thread
-        self.simulation_thread = threading.Thread(target=self.run_trajectory_simulation, daemon=True)
-        self.simulation_thread.start()
+        self.logger.info("Trajectory execution started.")
 
     def stop_trajectory(self):
         """Stop the trajectory execution."""
-        self.stop_simulation_flag = True
         self.trajectory_running = False
         self.trajectory_button.setText("Execute Trajectory")
-        
-        # Wait for the simulation thread to finish
-        if self.simulation_thread and self.simulation_thread.is_alive():
-            self.logger.info("Waiting for simulation thread to stop...")
-            self.simulation_thread.join(timeout=2.0)
-            if self.simulation_thread.is_alive():
-                self.logger.warning("Simulation thread did not stop gracefully.")
-        
         self.logger.info("Trajectory stopped.")
 
     def update_trajectory_params(self):
@@ -1023,6 +1220,24 @@ class PyBulletGUI(QWidget):
             )
             self.logger.error("Simulation must be started to upload an OBJ.")
             return
+
+        # Check if simulation is paused
+        if self.running and not self.paused:
+            reply = QMessageBox.question(
+                self,
+                "Pause Simulation?",
+                "It is recommended to pause the simulation before uploading objects for better stability and control.\n\n"
+                "Would you like to pause the simulation now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Pause the simulation
+                self.toggle_pause_simulation()
+                self.logger.info("Simulation paused before uploading OBJ.")
+            else:
+                self.logger.info("User chose to upload OBJ without pausing simulation.")
 
         # Open the PBR dialog directly without pre-selecting a file
         dialog = PBRLoadDialog(self.simulation_core, obj_path=None, parent=self, pedestal_half_z=self.pedestal_half_z)

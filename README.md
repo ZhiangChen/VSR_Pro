@@ -68,11 +68,12 @@ VSR_Pro/
    pip install pybullet
    pip install PyQt5
    pip install PyYAML
+   pip install numpy
    ```
 
    Or install all dependencies at once:
    ```bash
-   pip install pybullet PyQt5 PyYAML
+   pip install pybullet PyQt5 PyYAML numpy
    ```
 
 ### Required Dependencies

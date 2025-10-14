@@ -431,6 +431,73 @@ class SimulationCore:
         except Exception as e:
             self.logger.error(f"step_trajectory error: {e}")
 
+    def set_pedestal_position(self, position, orientation_euler):
+        """
+        Maintain pedestal at a specific position and orientation using POSITION_CONTROL.
+        Used when trajectory is not running to hold the last known position.
+        
+        :param position: [x, y, z] target position
+        :param orientation_euler: [roll, pitch, yaw] target orientation in radians
+        """
+        try:
+            # Prismatic joints (indices 0,1,2): X, Y, Z using POSITION_CONTROL
+            p.setJointMotorControl2(self.robot_id, 0, p.POSITION_CONTROL,
+                                    targetPosition=float(position[0]),
+                                    force=self.max_efforts["prismatic_x"],
+                                    physicsClientId=self.client_id)
+            p.setJointMotorControl2(self.robot_id, 1, p.POSITION_CONTROL,
+                                    targetPosition=float(position[1]),
+                                    force=self.max_efforts["prismatic_y"],
+                                    physicsClientId=self.client_id)
+            p.setJointMotorControl2(self.robot_id, 2, p.POSITION_CONTROL,
+                                    targetPosition=float(position[2]),
+                                    force=self.max_efforts["prismatic_z"],
+                                    physicsClientId=self.client_id)
+
+            # Spherical joint (index 3): Use POSITION_CONTROL
+            # Convert Euler angles to quaternion
+            target_quat = p.getQuaternionFromEuler(orientation_euler)
+            
+            p.setJointMotorControlMultiDof(
+                self.robot_id, 3,
+                p.POSITION_CONTROL,
+                targetPosition=target_quat,
+                force=[self.max_efforts["spherical"]] * 3,
+                physicsClientId=self.client_id
+            )
+        except Exception as e:
+            self.logger.error(f"set_pedestal_position error: {e}")
+
+    def hold_pedestal_position(self):
+        """
+        Hold the pedestal at its current position using zero velocity control.
+        Used when trajectory is not running to maintain the current position without drift.
+        
+        This applies zero velocity targets to all joints, which maintains their current
+        positions while allowing the physics engine to handle external disturbances naturally.
+        """
+        try:
+            # Prismatic joints (indices 0,1,2): X, Y, Z using zero velocity
+            joint_names = ['prismatic_x', 'prismatic_y', 'prismatic_z']
+            for joint_idx in range(3):
+                p.setJointMotorControl2(
+                    self.robot_id, 
+                    joint_idx, 
+                    p.VELOCITY_CONTROL,
+                    targetVelocity=0.0,
+                    force=self.max_efforts[joint_names[joint_idx]],
+                    physicsClientId=self.client_id
+                )
+            
+            # Spherical joint (index 3): set zero angular velocity using torque control
+            p.setJointMotorControlMultiDof(
+                self.robot_id, 3,
+                p.TORQUE_CONTROL,
+                force=[0.0, 0.0, 0.0],
+                physicsClientId=self.client_id
+            )
+        except Exception as e:
+            self.logger.error(f"hold_pedestal_position error: {e}")
 
     def spawn_obj_on_pedestal(
         self,
