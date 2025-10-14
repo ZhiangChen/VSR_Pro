@@ -259,7 +259,7 @@ class SimulationCore:
         
         # Calculate maximum torques for spherical joint (use maximum inertia for worst case)
         max_inertia = max(pedestal_inertia)  # Use largest moment of inertia
-        max_torque = max_inertia * max_ang_acc
+        max_torque = max_inertia * max_ang_acc * safety_factor/2.
         
         efforts = {
             "prismatic_x": max_force_x,
@@ -403,18 +403,19 @@ class SimulationCore:
                                     force=self.max_efforts["prismatic_z"],
                                     physicsClientId=self.client_id)
 
-            # Spherical joint (index 3): Use TORQUE_CONTROL with PD controller
+            # Spherical joint (index 3): Use TORQUE_CONTROL with P controller
             # Get current angular velocity
             joint_state = p.getJointStateMultiDof(self.robot_id, 3, physicsClientId=self.client_id)
             current_ang_vel = joint_state[1]  # [wx, wy, wz]
             
-            # PD controller: torque = Kp * (target_vel - current_vel) + Kd * 0
-            # Simple proportional control for velocity tracking
-            Kp = self.max_efforts["spherical"] * 10.0  # Proportional gain
+            # Proportional controller for velocity tracking
+            # PyBullet's internal damping provides sufficient stabilization
+            Kp = self.max_efforts["spherical"] * 10.0   # Proportional gain
             target_ang_vel = [vroll, vpitch, vyaw]
             
+            # P control: torque = Kp * (target - current)
             torques = [
-                Kp * (target_ang_vel[i] - current_ang_vel[i]) 
+                Kp * (target_ang_vel[i] - current_ang_vel[i])
                 for i in range(3)
             ]
             
@@ -489,11 +490,30 @@ class SimulationCore:
                     physicsClientId=self.client_id
                 )
             
-            # Spherical joint (index 3): set zero angular velocity using torque control
+            # Spherical joint (index 3): Use P controller to stop rotation
+            # Get current angular velocity
+            joint_state = p.getJointStateMultiDof(self.robot_id, 3, physicsClientId=self.client_id)
+            current_ang_vel = joint_state[1]  # [wx, wy, wz]
+            
+            # Proportional controller for stopping rotation
+            # PyBullet's internal damping provides sufficient stabilization
+            Kp = self.max_efforts["spherical"] * 10.0   # Proportional gain
+            target_ang_vel = [0.0, 0.0, 0.0]  # Zero velocity to stop rotation
+            
+            # P control: torque = Kp * (target - current)
+            torques = [
+                Kp * (target_ang_vel[i] - current_ang_vel[i])
+                for i in range(3)
+            ]
+            
+            # Clamp torques to max effort
+            max_torque = self.max_efforts["spherical"]
+            torques = [max(-max_torque, min(max_torque, t)) for t in torques]
+            
             p.setJointMotorControlMultiDof(
                 self.robot_id, 3,
                 p.TORQUE_CONTROL,
-                force=[0.0, 0.0, 0.0],
+                force=torques,
                 physicsClientId=self.client_id
             )
         except Exception as e:
