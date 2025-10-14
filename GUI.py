@@ -6,6 +6,7 @@ import threading
 import yaml
 import logging
 import os
+import csv
 from datetime import datetime
 import numpy as np
 
@@ -354,7 +355,10 @@ class PyBulletGUI(QWidget):
         self.running = False
         self.paused = False  # New state for pause functionality
         self.trajectory_running = False
+        self.disp_trajectory_running = False  # Flag for displacement trajectory
         self.stop_simulation_flag = False
+        self.disp_path = None  # Path to displacement trajectory file
+        self.disp_trajectory_data = None  # Loaded displacement trajectory data
         
         # Last known pedestal position for position control
         self.last_pedestal_position = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # [x, y, z, roll, pitch, yaw]
@@ -480,8 +484,19 @@ class PyBulletGUI(QWidget):
         sim_group.setLayout(sim_layout)
         main_layout.addWidget(sim_group)
 
+        # --------------- Object Upload ---------------
+        obj_group = QGroupBox("Object Upload")
+        obj_layout = QVBoxLayout()
+
+        self.upload_obj_button = QPushButton("Upload PBR OBJ")
+        self.upload_obj_button.clicked.connect(self.upload_obj)
+        obj_layout.addWidget(self.upload_obj_button)
+
+        obj_group.setLayout(obj_layout)
+        main_layout.addWidget(obj_group)
+
         # ---------------- Trajectory Settings ----------------
-        traj_group = QGroupBox("Trajectory Settings")
+        traj_group = QGroupBox("Pulse Trajectory Settings")
         traj_layout = QVBoxLayout()
 
         # Cycle Number input
@@ -493,7 +508,7 @@ class PyBulletGUI(QWidget):
         traj_layout.addLayout(cycle_layout)
 
         # Linear DOFs
-        linear_box = QGroupBox("Linear Motion (X, Y, Z)")
+        linear_box = QGroupBox("Linear Motion")
         linear_layout = QGridLayout()
 
         # Header row
@@ -555,7 +570,7 @@ class PyBulletGUI(QWidget):
         traj_layout.addWidget(linear_box)
 
         # Rotational DOFs
-        rot_box = QGroupBox("Rotational Motion (Roll, Pitch, Yaw)")
+        rot_box = QGroupBox("Rotational Motion")
         rot_layout = QGridLayout()
 
         # Header row
@@ -616,23 +631,39 @@ class PyBulletGUI(QWidget):
         rot_box.setLayout(rot_layout)
         traj_layout.addWidget(rot_box)
 
-        self.trajectory_button = QPushButton("Execute Trajectory")
+        self.trajectory_button = QPushButton("Execute Pulse Trajectory")
         self.trajectory_button.clicked.connect(self.toggle_trajectory)
         traj_layout.addWidget(self.trajectory_button)
 
         traj_group.setLayout(traj_layout)
         main_layout.addWidget(traj_group)
 
-        # --------------- Object Upload ---------------
-        obj_group = QGroupBox("Object Upload")
-        obj_layout = QVBoxLayout()
+        # ---------------- Displacement Trajectory ----------------
+        disp_group = QGroupBox("Displacement Trajectory")
+        disp_layout = QVBoxLayout()  # main vertical layout (two rows)
 
-        self.upload_obj_button = QPushButton("Upload PBR OBJ")
-        self.upload_obj_button.clicked.connect(self.upload_obj)
-        obj_layout.addWidget(self.upload_obj_button)
+        # --- Row 1: Label + Browse button ---
+        top_row = QHBoxLayout()
+        self.disp_path_label = QLabel("No file selected" if not self.disp_path else self.disp_path)
+        self.disp_path_label.setWordWrap(True)
+        top_row.addWidget(self.disp_path_label, stretch=1)
 
-        obj_group.setLayout(obj_layout)
-        main_layout.addWidget(obj_group)
+        self.disp_browse_button = QPushButton("Browse...")
+        self.disp_browse_button.clicked.connect(self.browse_disp_file)
+        top_row.addWidget(self.disp_browse_button)
+
+        disp_layout.addLayout(top_row)
+
+        # --- Row 2: Execute button ---
+        self.disp_trajectory_button = QPushButton("Execute Displacement Trajectory")
+        self.disp_trajectory_button.clicked.connect(self.toggle_disp_trajectory)
+        #self.disp_trajectory_button.setFixedHeight(32)  # optional: uniform button height
+        disp_layout.addWidget(self.disp_trajectory_button)
+
+        # --- Final assembly ---
+        disp_group.setLayout(disp_layout)
+        main_layout.addWidget(disp_group)
+
         
         # Initialize PGV/PGA calculations
         self.initialize_pgv_pga()
@@ -700,7 +731,7 @@ class PyBulletGUI(QWidget):
                 pitch_deg = math.degrees(orn_euler[1])
                 yaw_deg = math.degrees(orn_euler[2])
                 
-                self.position_label.setText(f"Pedestal Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
+                self.position_label.setText(f"Pedestal Position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
                 self.orientation_label.setText(f"Pedestal Orientation: Roll={roll_deg:.2f}°, Pitch={pitch_deg:.2f}°, Yaw={yaw_deg:.2f}°")
         except Exception as e:
             self.logger.error(f"update_gui_display error: {e}")
@@ -881,6 +912,7 @@ class PyBulletGUI(QWidget):
             else:
                 current_time = step_count * self.simulation_dt
             
+            # Execute pulse trajectory
             if self.trajectory_running:
                 # Calculate trajectory duration if just started
                 if trajectory_start_time is None:
@@ -906,7 +938,7 @@ class PyBulletGUI(QWidget):
                         self.trajectory_duration = 20.0
                     
                     total_steps = int(self.trajectory_duration * self.simulation_frequency)
-                    self.logger.info(f"run_simulation_loop: Starting trajectory: {cycle_number} cycles, {self.trajectory_duration:.2f}s, {total_steps} steps")
+                    self.logger.info(f"run_simulation_loop: Starting pulse trajectory: {cycle_number} cycles, {self.trajectory_duration:.2f}s, {total_steps} steps")
                     
                     # Start data recording
                     self.start_recording()
@@ -917,7 +949,7 @@ class PyBulletGUI(QWidget):
                 # Check if trajectory duration is exceeded
                 if t >= self.trajectory_duration:
                     elapsed_steps = step_count - trajectory_start_step
-                    self.logger.info(f"run_simulation_loop: Trajectory completed in {t:.2f}s ({elapsed_steps} steps)")
+                    self.logger.info(f"run_simulation_loop: Pulse trajectory completed in {t:.2f}s ({elapsed_steps} steps)")
                     
                     # Get final position
                     try:
@@ -930,7 +962,7 @@ class PyBulletGUI(QWidget):
                     # Stop trajectory and recording
                     self.trajectory_running = False
                     trajectory_start_time = None
-                    self.trajectory_button.setText("Execute Trajectory")
+                    self.trajectory_button.setText("Execute Pulse Trajectory")
                     
                     # Stop data recording and save
                     self.stop_recording()
@@ -943,10 +975,86 @@ class PyBulletGUI(QWidget):
                         t=t
                     )
                 except Exception as e:
-                    self.logger.error(f"run_simulation_loop: trajectory step error at t={t:.3f}: {e}")
+                    self.logger.error(f"run_simulation_loop: pulse trajectory step error at t={t:.3f}: {e}")
                 
                 # Record current poses during trajectory execution
                 self.record_current_poses(t)
+            
+            # Execute displacement trajectory
+            elif self.disp_trajectory_running:
+                # Initialize displacement trajectory if just started
+                if trajectory_start_time is None:
+                    trajectory_start_time = current_time
+                    trajectory_start_step = step_count
+                    
+                    # Get trajectory duration from loaded data
+                    if self.disp_trajectory_data is None:
+                        self.logger.error("run_simulation_loop: No displacement trajectory data loaded!")
+                        self.disp_trajectory_running = False
+                        self.disp_trajectory_button.setText("Execute Displacement Trajectory")
+                        continue
+                    
+                    self.trajectory_duration = self.disp_trajectory_data['time'][-1]
+                    num_samples = len(self.disp_trajectory_data['time'])
+                    
+                    self.logger.info(f"run_simulation_loop: Starting displacement trajectory: {self.trajectory_duration:.2f}s, {num_samples} samples")
+                    
+                    # Start data recording
+                    self.start_recording()
+                
+                # Calculate time since trajectory started (in simulation time)
+                t = current_time - trajectory_start_time
+                
+                # Check if trajectory duration is exceeded
+                if t >= self.trajectory_duration:
+                    elapsed_steps = step_count - trajectory_start_step
+                    self.logger.info(f"run_simulation_loop: Displacement trajectory completed in {t:.2f}s ({elapsed_steps} steps)")
+                    
+                    # Get final position
+                    try:
+                        link_state = p.getLinkState(self.simulation_core.robot_id, 3, physicsClientId=self.simulation_core.client_id)
+                        pos = link_state[0]
+                        self.logger.info(f"run_simulation_loop: Final position: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+                    except Exception as e:
+                        self.logger.error(f"run_simulation_loop: Error getting final position: {e}")
+                    
+                    # Stop trajectory and recording
+                    self.disp_trajectory_running = False
+                    trajectory_start_time = None
+                    self.disp_trajectory_button.setText("Execute Displacement Trajectory")
+                    
+                    # Stop data recording and save
+                    self.stop_recording()
+                    continue
+                
+                # Execute displacement trajectory step
+                try:
+                    # Find the appropriate index in the trajectory data
+                    # Since the CSV is sampled at simulation frequency, we can use direct indexing
+                    step_index = step_count - trajectory_start_step
+                    
+                    if step_index < len(self.disp_trajectory_data['time']):
+                        # Get displacement for current time step
+                        displacement = [
+                            self.disp_trajectory_data['X_m'][step_index],
+                            self.disp_trajectory_data['Y_m'][step_index],
+                            self.disp_trajectory_data['Z_m'][step_index],
+                            self.disp_trajectory_data['Roll_rad'][step_index],
+                            self.disp_trajectory_data['Pitch_rad'][step_index],
+                            self.disp_trajectory_data['Yaw_rad'][step_index]
+                        ]
+                        
+                        # Apply displacement using position control
+                        self.simulation_core.step_displacement_trajectory(displacement)
+                    else:
+                        self.logger.warning(f"run_simulation_loop: Step index {step_index} out of range")
+                        
+                except Exception as e:
+                    self.logger.error(f"run_simulation_loop: displacement trajectory step error at t={t:.3f}: {e}")
+                
+                # Record current poses during trajectory execution
+                self.record_current_poses(t)
+            
             else:
                 # No trajectory running - hold current position with zero velocity control
                 try:
@@ -1008,10 +1116,17 @@ class PyBulletGUI(QWidget):
 
     def stop_simulation(self):
         """Stop the simulation completely."""
-        # Stop trajectory if running
+        # Stop pulse trajectory if running
         if self.trajectory_running:
             self.trajectory_running = False
-            self.trajectory_button.setText("Execute Trajectory")
+            self.trajectory_button.setText("Execute Pulse Trajectory")
+            self.logger.info("Stopped pulse trajectory due to simulation stop.")
+        
+        # Stop displacement trajectory if running
+        if self.disp_trajectory_running:
+            self.disp_trajectory_running = False
+            self.disp_trajectory_button.setText("Execute Displacement Trajectory")
+            self.logger.info("Stopped displacement trajectory due to simulation stop.")
         
         # Signal simulation thread to stop
         self.stop_simulation_flag = True
@@ -1163,7 +1278,7 @@ class PyBulletGUI(QWidget):
                 "Please start the simulation first before executing a trajectory.\n\n"
                 "Click the 'Start Simulation' button to initialize the simulation."
             )
-            self.logger.error("Simulation not started.")
+            self.logger.error("Pulse trajectory: Simulation not started.")
             return
         
         # Additional check for simulation core and robot
@@ -1174,23 +1289,34 @@ class PyBulletGUI(QWidget):
                 "Simulation core is not properly initialized.\n\n"
                 "Please restart the application and try again."
             )
-            self.logger.error("Simulation core not properly initialized.")
+            self.logger.error("Pulse trajectory: Simulation core not properly initialized.")
+            return
+        
+        # Check if displacement trajectory is running
+        if self.disp_trajectory_running:
+            QMessageBox.warning(
+                self,
+                "Displacement Trajectory Running",
+                "Cannot execute pulse trajectory while displacement trajectory is active.\n\n"
+                "Please stop the displacement trajectory first."
+            )
+            self.logger.error("Attempted to start pulse trajectory while displacement trajectory is running.")
             return
 
         # Check if already running
         if self.trajectory_running:
-            self.logger.warning("Trajectory is already running.")
+            self.logger.warning("Pulse trajectory is already running.")
             return
 
         self.update_trajectory_params()
         self.trajectory_running = True
-        self.trajectory_button.setText("Stop Trajectory")
-        self.logger.info("Trajectory execution started.")
+        self.trajectory_button.setText("Stop Pulse Trajectory")
+        self.logger.info("Pulse trajectory execution started.")
 
     def stop_trajectory(self):
         """Stop the trajectory execution."""
         self.trajectory_running = False
-        self.trajectory_button.setText("Execute Trajectory")
+        self.trajectory_button.setText("Execute Pulse Trajectory")
         self.logger.info("Trajectory stopped.")
 
     def update_trajectory_params(self):
@@ -1206,6 +1332,228 @@ class PyBulletGUI(QWidget):
         axes = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
         for axis in axes:
             self.update_pgv_pga(axis)
+
+    ###########################################################################
+    # Displacement Trajectory
+    ###########################################################################
+    def browse_disp_file(self):
+        """Open file dialog to select a displacement trajectory file (.csv)."""
+        disp_path, _ = QFileDialog.getOpenFileName(self, "Select Displacement Trajectory File (.csv)", "", "Displacement Files (*.csv)")
+        if disp_path:
+            self.disp_path = disp_path
+            self.disp_path_label.setText(disp_path)
+            self.logger.info(f"Selected displacement file: {disp_path}")
+    
+    def validate_and_load_displacement_trajectory(self, csv_path):
+        """
+        Validate and load displacement trajectory from CSV file.
+        
+        :param csv_path: Path to CSV file
+        :return: (valid, error_msg, trajectory_data) or (False, error_msg, None)
+        """
+        # Check if file exists
+        if not os.path.exists(csv_path):
+            return False, f"File does not exist: {csv_path}", None
+        
+        self.logger.info(f"Validating displacement trajectory: {csv_path}")
+        
+        # Read CSV file header and first few rows
+        try:
+            with open(csv_path, 'r') as f:
+                reader = csv.reader(f)
+                header = next(reader)
+                
+                # Read first two rows to check sampling frequency
+                first_row = next(reader)
+                second_row = next(reader)
+            
+            self.logger.info(f"CSV Header: {header}")
+            
+        except Exception as e:
+            error_msg = f"Error reading CSV file: {e}"
+            self.logger.error(error_msg)
+            return False, error_msg, None
+        
+        # Check if 'time_s' column exists
+        if 'time_s' not in header:
+            error_msg = "CSV must have a 'time_s' column"
+            self.logger.error(error_msg)
+            return False, error_msg, None
+        
+        # Check sampling frequency
+        try:
+            time_idx = header.index('time_s')
+            t0 = float(first_row[time_idx])
+            t1 = float(second_row[time_idx])
+            dt = t1 - t0
+            
+            detected_frequency = 1.0 / dt if dt > 0 else 0.0
+            
+            self.logger.info(f"Detected sampling frequency: {detected_frequency:.2f} Hz")
+            self.logger.info(f"Expected simulation frequency: {self.simulation_frequency} Hz")
+            
+            # Check if frequencies match (allow 1% tolerance)
+            if abs(detected_frequency - self.simulation_frequency) > self.simulation_frequency * 0.01:
+                error_msg = (
+                    f"Sampling frequency mismatch!\n\n"
+                    f"CSV frequency: {detected_frequency:.2f} Hz\n"
+                    f"Simulation frequency: {self.simulation_frequency} Hz\n\n"
+                    f"Please resample the trajectory to match the simulation frequency."
+                )
+                self.logger.error(error_msg)
+                return False, error_msg, None
+                
+        except Exception as e:
+            error_msg = f"Error checking sampling frequency: {e}"
+            self.logger.error(error_msg)
+            return False, error_msg, None
+        
+        # Check available DOFs
+        dof_mapping = {
+            'X_m': 0,
+            'Y_m': 1,
+            'Z_m': 2,
+            'Roll_rad': 3,
+            'Pitch_rad': 4,
+            'Yaw_rad': 5
+        }
+        
+        available_dofs = []
+        missing_dofs = []
+        
+        for dof_name in dof_mapping.keys():
+            if dof_name in header:
+                available_dofs.append(dof_name)
+            else:
+                missing_dofs.append(dof_name)
+        
+        self.logger.info(f"Available DOFs: {available_dofs}")
+        if missing_dofs:
+            self.logger.info(f"Missing DOFs (will use zeros): {missing_dofs}")
+        
+        if len(available_dofs) == 0:
+            error_msg = "No valid DOF columns found in CSV"
+            self.logger.error(error_msg)
+            return False, error_msg, None
+        
+        # Read all trajectory data
+        try:
+            data = {}
+            with open(csv_path, 'r') as f:
+                reader = csv.DictReader(f)
+                
+                # Initialize data arrays
+                data['time'] = []
+                for dof_name in dof_mapping.keys():
+                    data[dof_name] = []
+                
+                # Read all rows
+                for row in reader:
+                    data['time'].append(float(row['time_s']))
+                    
+                    for dof_name in dof_mapping.keys():
+                        if dof_name in row:
+                            data[dof_name].append(float(row[dof_name]))
+                        else:
+                            # Missing DOF - use 0.0
+                            data[dof_name].append(0.0)
+            
+            # Convert to numpy arrays
+            for key in data:
+                data[key] = np.array(data[key])
+            
+            num_samples = len(data['time'])
+            duration = data['time'][-1] - data['time'][0]
+            
+            self.logger.info(f"Trajectory loaded successfully:")
+            self.logger.info(f"  Number of samples: {num_samples}")
+            self.logger.info(f"  Duration: {duration:.2f} s")
+            
+            return True, "Trajectory loaded successfully", data
+            
+        except Exception as e:
+            error_msg = f"Error reading trajectory data: {e}"
+            self.logger.error(error_msg)
+            return False, error_msg, None
+            
+    def toggle_disp_trajectory(self):
+        """Toggle displacement trajectory execution."""
+        if not self.disp_trajectory_running:
+            self.start_disp_trajectory()
+        else:
+            self.stop_disp_trajectory()
+    
+    def start_disp_trajectory(self):
+        """Start displacement trajectory execution."""
+        # Check if simulation has been started
+        if not self.simulation_started:
+            QMessageBox.warning(
+                self,
+                "Simulation Not Started",
+                "Please start the simulation first before executing a displacement trajectory.\n\n"
+                "Click the 'Start Simulation' button to initialize the simulation."
+            )
+            self.logger.error("Attempted to start displacement trajectory without starting simulation.")
+            return
+        
+        # Additional check for simulation core and robot
+        if not self.simulation_core or not self.simulation_core.robot_id:
+            QMessageBox.warning(
+                self,
+                "Simulation Error",
+                "Simulation core is not properly initialized.\n\n"
+                "Please restart the application and try again."
+            )
+            self.logger.error("Simulation core not properly initialized for displacement trajectory.")
+            return
+        
+        # Check if pulse trajectory is running
+        if self.trajectory_running:
+            QMessageBox.warning(
+                self,
+                "Pulse Trajectory Running",
+                "Cannot execute displacement trajectory while pulse trajectory is active.\n\n"
+                "Please stop the pulse trajectory first."
+            )
+            self.logger.error("Attempted to start displacement trajectory while pulse trajectory is running.")
+            return
+        
+        # Check if displacement path is valid
+        if not self.disp_path:
+            QMessageBox.warning(
+                self,
+                "No Trajectory File Selected",
+                "Please select a displacement trajectory file first.\n\n"
+                "Click the 'Browse...' button to select a CSV file."
+            )
+            self.logger.error("No displacement trajectory file selected.")
+            return
+        
+        # Validate and load the trajectory
+        valid, error_msg, trajectory_data = self.validate_and_load_displacement_trajectory(self.disp_path)
+        
+        if not valid:
+            QMessageBox.critical(
+                self,
+                "Invalid Trajectory File",
+                f"The selected trajectory file is invalid:\n\n{error_msg}"
+            )
+            self.logger.error(f"Invalid trajectory file: {error_msg}")
+            return
+        
+        # Store the trajectory data
+        self.disp_trajectory_data = trajectory_data
+        
+        # Start the trajectory
+        self.disp_trajectory_running = True
+        self.disp_trajectory_button.setText("Stop Displacement Trajectory")
+        self.logger.info("Displacement trajectory execution started.")
+    
+    def stop_disp_trajectory(self):
+        """Stop displacement trajectory execution."""
+        self.disp_trajectory_running = False
+        self.disp_trajectory_button.setText("Execute Displacement Trajectory")
+        self.logger.info("Displacement trajectory execution stopped.")
 
     ###########################################################################
     # Upload OBJ with Live Preview

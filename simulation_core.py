@@ -499,6 +499,50 @@ class SimulationCore:
         except Exception as e:
             self.logger.error(f"hold_pedestal_position error: {e}")
 
+    def step_displacement_trajectory(self, displacement):
+        """
+        Apply displacement trajectory using POSITION_CONTROL.
+        Used for pre-recorded displacement trajectories from CSV files.
+        
+        :param displacement: List or array [x, y, z, roll, pitch, yaw]
+                            Position in meters, orientation in radians
+        """
+        try:
+            # Validate input
+            if len(displacement) != 6:
+                self.logger.error(f"step_displacement_trajectory: Expected 6 DOFs, got {len(displacement)}")
+                return
+            
+            x, y, z, roll, pitch, yaw = displacement
+            
+            # Prismatic joints (indices 0,1,2): X, Y, Z using POSITION_CONTROL
+            p.setJointMotorControl2(self.robot_id, 0, p.POSITION_CONTROL,
+                                    targetPosition=float(x),
+                                    force=self.max_efforts["prismatic_x"],
+                                    physicsClientId=self.client_id)
+            p.setJointMotorControl2(self.robot_id, 1, p.POSITION_CONTROL,
+                                    targetPosition=float(y),
+                                    force=self.max_efforts["prismatic_y"],
+                                    physicsClientId=self.client_id)
+            p.setJointMotorControl2(self.robot_id, 2, p.POSITION_CONTROL,
+                                    targetPosition=float(z),
+                                    force=self.max_efforts["prismatic_z"],
+                                    physicsClientId=self.client_id)
+
+            # Spherical joint (index 3): Use POSITION_CONTROL
+            # Convert Euler angles to quaternion
+            target_quat = p.getQuaternionFromEuler([roll, pitch, yaw])
+            
+            p.setJointMotorControlMultiDof(
+                self.robot_id, 3,
+                p.POSITION_CONTROL,
+                targetPosition=target_quat,
+                force=[self.max_efforts["spherical"]] * 3,
+                physicsClientId=self.client_id
+            )
+        except Exception as e:
+            self.logger.error(f"step_displacement_trajectory error: {e}")
+
     def spawn_obj_on_pedestal(
         self,
         obj_path: str,

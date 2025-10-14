@@ -3,7 +3,7 @@ simulation_settings:
   simulation_frequency: 500  # Simulation frequency in Hz
   GUI_update_frequency: 60  # GUI update frequency in Hz
   enable_graphics: True        # Enable PyBullet GUI
-  use_real_time: False    # Use real-time simulation
+  use_real_time: True    # Use real-time simulation
   log_file: "data/vsr_pro.log"  # Path to log file
 
 structure:
