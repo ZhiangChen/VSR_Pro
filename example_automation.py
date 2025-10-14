@@ -27,7 +27,7 @@ def main():
         print("ERROR: Failed to start simulation")
         return
     
-    time.sleep(2)  # Wait for simulation to stabilize
+    time.sleep(5)  # Wait for simulation to stabilize
     print("   Simulation started successfully")
     
     # Load a PBR object (example - adjust path and parameters as needed)
@@ -53,7 +53,7 @@ def main():
     print("\n4. Configuring pulse trajectory...")
     app.set_pulse_trajectory(
         cycle_number=2,
-        amp_x=0.1,      # 10 cm amplitude in X
+        amp_x=1.0,      # 1 m amplitude in X
         freq_x=1.0,     # 1 Hz frequency
         amp_yaw=0.05,   # 0.05 rad (~2.9°) yaw amplitude
         freq_yaw=1.0    # 1 Hz frequency

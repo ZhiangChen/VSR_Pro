@@ -674,7 +674,3 @@ If you're using the legacy `GUI.py`, consider migrating to the new API-based arc
 - Use `app.py` API instead of directly managing `SimulationCore`
 - See `example_automation.py` for reference implementations
 - Cleaner code with better separation of concerns
-
-## Todo
-- grid cosine pipeline
-- ground motion batch pipeline

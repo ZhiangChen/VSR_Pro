@@ -36,7 +36,7 @@ class PBRLoadDialog(QDialog):
         self.app = app  # VSRProApp instance
         self.pedestal_half_z = pedestal_half_z
 
-        self.setWindowTitle("Spawn OBJ with PBR & Collision Properties")
+        self.setWindowTitle("Spawn PBR")
 
         # Default offsets/orientation
         self.default_x = 0.0
@@ -330,7 +330,7 @@ class PyBulletGUI(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("VSR Pro (API Version)")
+        self.setWindowTitle("VSR Pro")
         self.setGeometry(100, 100, 650, 550)
 
         main_layout = QVBoxLayout(self)
