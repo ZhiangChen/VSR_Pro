@@ -706,10 +706,11 @@ class SimulationCore:
         :param mesh_scale: [sx, sy, sz] scaling of the OBJ
         :param offset: [dx, dy, dz] relative offset from pedestal link 3
         :param orientation_euler: [roll, pitch, yaw] in radians
-        :param pbr_props: optional dict for mass, friction, etc.
+        :param pbr_props: optional dict for mass, friction, inertia, etc.
                         Example:
                         {
                             "mass": 10.0,
+                            "localInertiaDiagonal": [0.1, 0.1, 0.1],  # [Ixx, Iyy, Izz]
                             "restitution": 0.2,
                             "lateralFriction": 0.5,
                             "spinningFriction": 0.1,
@@ -776,16 +777,24 @@ class SimulationCore:
 
         # 7) If we have PBR properties, apply them
         if pbr_props:
-            p.changeDynamics(
-                obj_id,
-                -1,
-                restitution=pbr_props.get("restitution", 0.0),
-                lateralFriction=pbr_props.get("lateralFriction", 0.5),
-                spinningFriction=pbr_props.get("spinningFriction", 0.0),
-                contactDamping=pbr_props.get("contactDamping", 0.0),
-                contactStiffness=pbr_props.get("contactStiffness", 1e5),
-                physicsClientId=self.client_id
-            )
+            # Build dynamics parameters
+            dynamics_params = {
+                "restitution": pbr_props.get("restitution", 0.0),
+                "lateralFriction": pbr_props.get("lateralFriction", 0.5),
+                "spinningFriction": pbr_props.get("spinningFriction", 0.0),
+                "contactDamping": pbr_props.get("contactDamping", 0.0),
+                "contactStiffness": pbr_props.get("contactStiffness", 1e5),
+                "physicsClientId": self.client_id
+            }
+            
+            # Add inertia if provided
+            if "localInertiaDiagonal" in pbr_props:
+                inertia = pbr_props["localInertiaDiagonal"]
+                if isinstance(inertia, (list, tuple)) and len(inertia) == 3:
+                    dynamics_params["localInertiaDiagonal"] = inertia
+                    self.logger.info(f"Setting custom inertia: {inertia}")
+            
+            p.changeDynamics(obj_id, -1, **dynamics_params)
             self.logger.info(f"Applied PBR properties: {pbr_props}")
             
             # Get and log the actual dynamics info

@@ -13,7 +13,7 @@ structure:
     inertia: [0.0, 0.0, 0.0]        # No inertia for static body
 
   pedestal:
-    type: "box"  # Options: "box" or "mesh"
+    type: "mesh"  # Options: "box" or "mesh"
     absolute_height: 6.0     # Height from ground to center of pedestal
     
     # Box pedestal configuration
@@ -28,6 +28,20 @@ structure:
       scaling: [1.0, 1.0, 1.0]        # Scaling factor [x, y, z]
       mass: 2000000.0                 # Heavy pedestal for stability
       inertia: [1668333333.3, 1668333333.3, 3333333333.3]  # Inertia values
+
+  pbr:
+    enable: True                     # Enable PBR object loading
+    path: "data/granite.obj"         # Path to PBR object file
+    position_offset: [0, 0, 0.5]     # Initial position offset [x, y, z]
+    orientation_offset: [0, 0, 0]    # Initial orientation offset (Euler angles) [roll, pitch, yaw]
+    scale: [1.0, 1.0, 1.0]           # Scaling factor [x, y, z]
+    mass: 10.0                       # Mass of the PBR object (kg)
+    inertia: [0.1, 0.1, 0.1]         # Inertia on principal axes [Ixx, Iyy, Izz] (kg·m²)
+    restitution: 0.3                 # Bounciness
+    lateralFriction: 0.5             # Friction coefficient
+    spinningFriction: 0.3            # Spinning friction coefficient
+    contactDamping: 100000000.0      # Contact damping
+    contactStiffness: 10000000000.0  # Contact stiffness
 
 dynamics:
   world_box:

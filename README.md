@@ -11,15 +11,21 @@ VSR Pro provides a complete simulation environment for a 6-degree-of-freedom (6-
 - **6-DOF Shake Table Simulation**: Simulates translational (X, Y, Z) and rotational (Roll, Pitch, Yaw) movements
 - **Dual Pedestal Options**: Choose between box pedestal (default) or mesh pedestal for terrain simulation
 - **Real-time Physics**: Powered by PyBullet physics engine with customizable simulation frequency
+- **Modular API Architecture**: Clean separation between GUI, API layer, and simulation core enabling both interactive and programmatic control
 - **Interactive GUI**: PyQt5-based interface for real-time control and visualization with pause/resume capability
+- **Python API**: `app.py` provides programmatic access for automation, batch processing, and scripting
 - **Dual Trajectory Modes**: 
   - Pulse trajectory: Customizable sine/cosine wave patterns with independent amplitude and frequency control
   - Displacement trajectory: CSV-based pre-recorded trajectories with position control
 - **Object Loading**: Support for loading external 3D objects (OBJ format) with PBR materials and collision detection
+  - **Auto-load from Config**: Configure PBR objects in `config.yaml` to auto-load on simulation start/reset
+  - **Custom Inertia**: Specify inertia on principal axes (Ixx, Iyy, Izz) for accurate rotational dynamics
+  - **GUI Upload**: Manually upload additional objects via "Upload PBR OBJ" button with live preview
+  - **Multi-object Tracking**: Track and record all objects from both config and GUI uploads
 - **Data Recording**: Automatic recording of pedestal and object poses during trajectory execution saved as NPZ files
 - **Comprehensive Logging**: UTF-8 encoded log files with timestamps for all operations
 - **YAML Configuration**: Flexible configuration system for simulation parameters, dynamics, and visual settings
-- **Utility Scripts**: Tools for trajectory generation and data visualization
+- **Utility Scripts**: Tools for trajectory generation, data visualization, and automation examples
 
 ## Project Structure
 
@@ -27,14 +33,19 @@ VSR Pro provides a complete simulation environment for a 6-degree-of-freedom (6-
 VSR_Pro/
 ├── LICENSE                     # Apache License 2.0
 ├── README.md                   # This file
-├── GUI.py                      # Main GUI application
+├── GUI.py                      # Original GUI application (legacy)
+├── GUI_test.py                 # Refactored GUI using app.py API
+├── app.py                      # Application API layer for programmatic control
 ├── simulation_core.py          # Core simulation engine
+├── example_automation.py       # Example automation script using app.py
 ├── config.yaml                 # Simulation configuration
 ├── data/                       # Data storage directory
-│   ├── run_*.npz              # Recorded trajectory data
+│   ├── logs/                   # Recorded trajectory data
+│   │   └── run_*.npz          # NPZ files with trajectory recordings
 │   ├── simulation.log         # Simulation log file
 │   └── displacement_trajectory.csv  # Example displacement trajectory
 ├── docs/                       # Documentation files
+│   ├── api_architecture.md    # API architecture documentation
 │   ├── segmentation_fault.md  # Troubleshooting guide
 │   └── vsr_pro_structure.md   # Architecture documentation
 ├── utils/                      # Utility scripts
@@ -45,11 +56,14 @@ VSR_Pro/
 
 ### File Descriptions
 
-- **`GUI.py`**: Main application entry point with PyQt5 interface including trajectory controls, object loading dialogs, and real-time visualization
+- **`GUI.py`**: Original GUI application (legacy version, will be deprecated)
+- **`GUI_test.py`**: Refactored GUI using the new API architecture - cleaner, more maintainable code
+- **`app.py`**: Application API layer (`VSRProApp` class) providing programmatic access to simulation control, trajectory execution, object loading, and data recording. Can be used by GUI or Python scripts
+- **`example_automation.py`**: Example script demonstrating how to use `app.py` for automation, batch processing, and headless simulation
 - **`simulation_core.py`**: Core simulation engine managing PyBullet physics, robot creation (box or mesh pedestal), joint control (velocity and position), and object spawning
 - **`config.yaml`**: Configuration file defining simulation settings (frequency, gravity, real-time mode), structural parameters (including pedestal type selection), dynamics properties, joint limits, and visual appearance
 - **`data/`**: Directory for storing recorded trajectory data (NPZ format), simulation logs (UTF-8 encoded), displacement trajectory CSV files, and mesh files (e.g., rough_terrain.obj)
-- **`docs/`**: Documentation and troubleshooting guides
+- **`docs/`**: Documentation and troubleshooting guides including detailed API architecture documentation
 - **`utils/`**: Utility scripts for trajectory generation and data analysis
 
 ## Installation & Setup
@@ -93,10 +107,69 @@ VSR_Pro/
 
 ### Running the Application
 
-Start the GUI application:
+#### Option 1: GUI Interface (Recommended for Interactive Use)
+
+Start the new API-based GUI:
+```bash
+python GUI_test.py
+```
+
+Or use the legacy GUI:
 ```bash
 python GUI.py
 ```
+
+#### Option 2: Python API (Recommended for Automation)
+
+Use the `app.py` API for programmatic control:
+
+```python
+from app import VSRProApp
+import time
+
+# Initialize application
+app = VSRProApp("config.yaml")
+
+# Start simulation
+app.start_simulation()
+time.sleep(1)
+
+# Load an object
+obj_id = app.load_pbr_object(
+    obj_path="data/cube.obj",
+    offset=[0.0, 0.0, 0.5],
+    mass=10.0
+)
+
+# Execute a pulse trajectory
+app.set_pulse_trajectory(
+    cycle_number=2,
+    amp_x=0.1,
+    freq_x=1.0
+)
+app.start_pulse_trajectory()
+
+# Wait for completion
+time.sleep(3)
+
+# Stop simulation
+app.stop_simulation()
+```
+
+See `example_automation.py` for more examples including batch processing.
+
+#### Option 3: Quick Start with Example Automation
+
+Run the example automation script:
+```bash
+python example_automation.py
+```
+
+This demonstrates:
+- Starting and stopping simulation
+- Configuring and executing trajectories
+- Querying simulation state
+- Batch processing multiple configurations
 
 ### GUI Controls and Features
 
@@ -321,9 +394,9 @@ dynamics:
 
 ## Workflow Examples
 
-### Example 1: Execute Pulse Trajectory
+### Example 1: Interactive GUI - Execute Pulse Trajectory
 ```bash
-1. Run: python GUI.py
+1. Run: python GUI_test.py
 2. Click "Start Simulation"
 3. Configure trajectory parameters:
    - Cycle Number: 3
@@ -331,10 +404,10 @@ dynamics:
    - Y: Amp=0.01m, Freq=2Hz
 4. Click "Execute Pulse Trajectory"
 5. Monitor real-time position display
-6. Data automatically saved to data/run_YYYYMMDD_HHMMSS.npz
+6. Data automatically saved to data/logs/run_YYYYMMDD_HHMMSS.npz
 ```
 
-### Example 2: Execute Displacement Trajectory
+### Example 2: Interactive GUI - Execute Displacement Trajectory
 ```bash
 1. Generate trajectory:
    cd utils
@@ -342,30 +415,88 @@ dynamics:
    
 2. Run GUI:
    cd ..
-   python GUI.py
+   python GUI_test.py
    
 3. Click "Start Simulation"
 4. Click "Browse..." in Displacement Trajectory section
 5. Select "data/displacement_trajectory.csv"
 6. Click "Execute Displacement Trajectory"
-7. Review recorded data in data/run_YYYYMMDD_HHMMSS.npz
+7. Review recorded data in data/logs/run_YYYYMMDD_HHMMSS.npz
 ```
 
-### Example 3: Load Object and Visualize
+### Example 3: Interactive GUI - Load Object and Visualize
 ```bash
-1. python GUI.py
+1. python GUI_test.py
 2. Click "Start Simulation"
-3. Click "Pause Simulation" (recommended for stability)
-4. Click "Upload PBR OBJ"
-5. Browse and select your OBJ file
-6. Configure pose and physics properties
-7. Click "Apply" to preview
-8. Click "Confirm" to finalize
-9. Click "Resume Simulation"
-10. Execute trajectory - object motion is recorded
+3. Click "Upload PBR OBJ" (simulation automatically pauses)
+4. Browse and select your OBJ file
+5. Configure pose and physics properties
+6. Click "Apply" to preview
+7. Click "Confirm" to finalize (simulation resumes)
+8. Execute trajectory - object motion is recorded
 ```
 
-### Example 4: Visualize Recorded Data
+### Example 4: Python API - Automated Batch Processing
+```python
+from app import VSRProApp
+import time
+
+test_frequencies = [0.5, 1.0, 2.0, 4.0]
+
+for freq in test_frequencies:
+    print(f"Testing frequency: {freq} Hz")
+    
+    # Create and start simulation
+    app = VSRProApp("config.yaml")
+    app.start_simulation()
+    time.sleep(1)
+    
+    # Run test
+    app.set_pulse_trajectory(
+        cycle_number=5,
+        amp_x=0.1,
+        freq_x=freq
+    )
+    app.start_pulse_trajectory()
+    
+    # Wait for completion
+    duration = 5.0 / freq  # cycles / frequency
+    time.sleep(duration + 1.0)
+    
+    # Data automatically saved to data/logs/
+    app.stop_simulation()
+    time.sleep(2)
+
+print("Batch processing complete!")
+```
+
+### Example 5: Python API - Load Object and Execute Trajectory
+```python
+from app import VSRProApp
+import time
+
+app = VSRProApp("config.yaml")
+app.start_simulation()
+time.sleep(1)
+
+# Load object on pedestal
+obj_id = app.load_pbr_object(
+    obj_path="data/cube.obj",
+    offset=[0.0, 0.0, 0.5],
+    mass=10.0,
+    restitution=0.3,
+    lateral_friction=0.6
+)
+
+# Execute displacement trajectory
+if app.load_displacement_trajectory("data/trajectory.csv"):
+    app.start_displacement_trajectory()
+    time.sleep(10.0)  # Wait for completion
+
+app.stop_simulation()
+```
+
+### Example 6: Visualize Recorded Data
 ```bash
 cd utils
 # Edit plot_npz.py to set path to your NPZ file
@@ -396,18 +527,54 @@ python plot_npz.py
 
 ### System Architecture
 
-The system follows a modular architecture with clear separation of concerns:
+The system follows a modular three-layer architecture with clear separation of concerns:
 
-1. **GUI Layer** (`GUI.py`): 
-   - PyQt5 user interface with real-time controls
-   - State management (running, paused, trajectory flags)
-   - CSV validation and loading
-   - Data recording coordination
-   - Threaded simulation loop
+```
+┌─────────────────────────────────────────┐
+│       Presentation Layer                │
+├─────────────────┬───────────────────────┤
+│  GUI_test.py    │  example_automation.py│
+│  (PyQt5 UI)     │  (Python Scripts)     │
+└────────┬────────┴──────────┬────────────┘
+         │                   │
+         └─────────┬─────────┘
+                   │
+         ┌─────────▼──────────┐
+         │      app.py        │
+         │  (VSRProApp API)   │  ← Business Logic Layer
+         └─────────┬──────────┘
+                   │
+         ┌─────────▼──────────┐
+         │ simulation_core.py │  ← Physics Engine Layer
+         │  (PyBullet Core)   │
+         └────────────────────┘
+```
 
-2. **Simulation Layer** (`simulation_core.py`): 
-   - PyBullet physics simulation (500 Hz)
-   - Robot creation and joint control
+#### 1. **Presentation Layer** (`GUI_test.py`, `example_automation.py`): 
+   - **GUI_test.py**: PyQt5 user interface with real-time controls and displays
+     - Delegates all business logic to `app.py`
+     - Focuses purely on UI concerns (buttons, inputs, labels)
+     - Automatically pauses simulation when loading objects
+   - **example_automation.py**: Python scripts for headless automation
+     - Batch processing capabilities
+     - Programmatic control without GUI
+     - CI/CD integration ready
+
+#### 2. **Business Logic Layer** (`app.py`): 
+   - **VSRProApp API class**: High-level application programming interface
+   - **Simulation Control**: start, stop, pause, resume, reset
+   - **Trajectory Management**: 
+     - Pulse trajectories with sinusoidal motion
+     - Displacement trajectories from CSV files
+   - **Object Management**: Load and track PBR objects
+   - **Data Recording**: Automatic recording to NPZ files
+   - **Thread Management**: Handles simulation loop in separate thread
+   - **State Management**: Running, paused, trajectory flags
+   - **GUI-agnostic**: Can be used by any Python code
+
+#### 3. **Physics Engine Layer** (`simulation_core.py`): 
+   - PyBullet physics simulation (500 Hz default)
+   - Robot creation with box or mesh pedestal
    - Three control methods:
      - `step_trajectory()`: Velocity control for pulse trajectories
      - `step_displacement_trajectory()`: Position control for displacement trajectories
@@ -415,18 +582,29 @@ The system follows a modular architecture with clear separation of concerns:
    - Object spawning with PBR properties
    - UTF-8 logging
 
-3. **Configuration Layer** (`config.yaml`): 
+#### 4. **Configuration Layer** (`config.yaml`): 
    - YAML-based parameter management
    - Simulation settings, structure, joints, dynamics, visuals
-   - Shared between GUI and simulation core
+   - Shared across all layers
 
-4. **Utility Layer** (`utils/`):
+#### 5. **Utility Layer** (`utils/`):
    - Trajectory generation tools
    - Data visualization tools
    - Extensible for custom analysis
 
+### API Reference
+
+See `docs/api_architecture.md` for complete API documentation including:
+- Full method reference with parameters
+- Usage examples for each API method
+- Architecture diagrams
+- Migration guide from legacy code
+- Best practices for automation
+
 ### Key Design Features
 
+- **Separation of Concerns**: UI, business logic, and physics engine are cleanly separated
+- **Reusability**: Same API works for GUI and automation scripts
 - **Thread Safety**: Daemon thread for simulation loop, main thread for GUI
 - **Mutual Exclusion**: Only one trajectory type active at a time
 - **Data Integrity**: Automatic recording with timestamped filenames
@@ -436,6 +614,9 @@ The system follows a modular architecture with clear separation of concerns:
 
 ### Extending the System
 
+- **New GUI Interfaces**: Create new UIs using the `VSRProApp` API
+- **Web Interface**: Build REST API or web frontend using `app.py`
+- **ROS Integration**: Create ROS nodes that use `VSRProApp`
 - **New Trajectory Types**: Add control methods in `SimulationCore` (e.g., `step_custom_trajectory()`)
 - **Additional Sensors**: Implement sensor simulation in `SimulationCore.step_simulation()`
 - **Custom Objects**: Extend `spawn_obj_on_pedestal()` with new object types
@@ -453,12 +634,13 @@ The system follows a modular architecture with clear separation of concerns:
 
 ### Data Files
 
-**NPZ Format** (`data/run_*.npz`):
+**NPZ Format** (`data/logs/run_*.npz`):
 ```python
-data = np.load('data/run_20251013_200721.npz')
+data = np.load('data/logs/run_20251013_200721.npz')
 times = data['times']                    # Time array (s)
 pedestal = data['pedestal_poses']        # Shape: (N, 6) - [x,y,z,roll,pitch,yaw]
 obj_1 = data['pbr_object_1_poses']      # Shape: (N, 6) if object loaded
+metadata = data['metadata'].item()       # Simulation metadata
 ```
 
 **Log Format** (`data/simulation.log`):
@@ -472,10 +654,27 @@ obj_1 = data['pbr_object_1_poses']      # Shape: (N, 6) if object loaded
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
+## Documentation
 
+- **API Architecture**: See `docs/api_architecture.md` for detailed API documentation, usage examples, and architecture diagrams
+- **PBR Configuration**: See `docs/pbr_configuration.md` for guide on auto-loading PBR objects from config and multi-object tracking
+- **Troubleshooting**: See `docs/segmentation_fault.md` for common issues and solutions
+- **System Structure**: See `docs/vsr_pro_structure.md` for detailed system architecture
+
+## Migration Guide
+
+If you're using the legacy `GUI.py`, consider migrating to the new API-based architecture:
+
+### For Interactive Users:
+- Switch from `python GUI.py` to `python GUI_test.py`
+- All functionality is preserved with improved stability
+- Simulation automatically pauses when loading objects
+
+### For Developers/Automation:
+- Use `app.py` API instead of directly managing `SimulationCore`
+- See `example_automation.py` for reference implementations
+- Cleaner code with better separation of concerns
 
 ## Todo
-- create APIs for python pipeline
-- automate PBR load using config file
 - grid cosine pipeline
 - ground motion batch pipeline

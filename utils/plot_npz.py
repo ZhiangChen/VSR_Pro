@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 
 # ====== USER SETTINGS ======
-path = "../data/run_20251013_200721.npz"   # <-- set your .npz path here
+path = "../data/logs/run_20251014_134518.npz"   # <-- set your .npz path here
 SAVE_PLOTS = False                          # True to save PNGs next to the npz
 OUTDIR = None                               # Or set a folder string, e.g. "plots"
 # ===========================
