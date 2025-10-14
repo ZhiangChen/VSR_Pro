@@ -7,8 +7,7 @@ target PGV and PGA values for each enabled degree of freedom within
 an upper frequency limit.
 
 Outputs:
-  - .npz file with displacement, velocity, acceleration, and metadata
-  - .csv file with time vs displacement for all DOFs (for external use)
+    - .csv file with time vs displacement for all DOFs (for external use)
 """
 
 import os

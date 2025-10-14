@@ -40,6 +40,7 @@ class SimulationCore:
         # Load structure config
         self.world_box_config = self.config["structure"]["world_box"]
         self.pedestal_config  = self.config["structure"]["pedestal"]
+        self.pedestal_type = self.pedestal_config.get("type", "box")  # Default to box if not specified
         self.dynamics_config  = self.config["dynamics"]
         self.joint_config     = self.config["joints"]
         self.robot_visual_config = self.config["robot_visual"]
@@ -83,7 +84,18 @@ class SimulationCore:
         self.logger.info(f"Real-time mode: {self.use_real_time}")
 
     def create_robot(self):
-        self.logger.info("Creating 6-DOF Robot...")
+        """
+        Create the 6-DOF robot based on the pedestal type specified in config.
+        Chooses between box and mesh pedestal. If both are enabled, defaults to box.
+        """
+        if self.pedestal_type == "mesh":
+            self.create_mesh_robot()
+        else:
+            # Default to box pedestal
+            self.create_box_robot()
+
+    def create_box_robot(self):
+        self.logger.info("Creating 6-DOF Robot with Box Pedestal...")
 
         # Load the plane
         plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
@@ -97,8 +109,8 @@ class SimulationCore:
         )
         world_box_position = [0, 0, world_box_half_extents[2]]
 
-        # 2) Pedestal
-        pedestal_half_extents = [dim / 2 for dim in self.pedestal_config["dimensions"]]
+        # 2) Box Pedestal
+        pedestal_half_extents = [dim / 2 for dim in self.pedestal_config["box"]["dimensions"]]
         pedestal_collision_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=pedestal_half_extents)
         pedestal_visual_shape    = p.createVisualShape(
             p.GEOM_BOX, halfExtents=pedestal_half_extents, rgbaColor=self.robot_visual_config["pedestal_color"]
@@ -110,7 +122,7 @@ class SimulationCore:
             raise ValueError("Pedestal position is too low and would intersect with the world box.")
 
         num_links = 4
-        link_masses = [0.0, 0.0, 0.0, self.pedestal_config["mass"]]
+        link_masses = [0.0, 0.0, 0.0, self.pedestal_config["box"]["mass"]]
         link_collision_shapes = [-1, -1, -1, pedestal_collision_shape]
         link_visual_shapes    = [-1, -1, -1, pedestal_visual_shape]
 
@@ -174,10 +186,119 @@ class SimulationCore:
         # Set joint limits and maximum efforts
         self.set_joint_limits_and_efforts()
         
-        self.logger.info("Pedestal and dynamics applied.")
+        self.logger.info("Box pedestal and dynamics applied.")
+
+    def create_mesh_robot(self):
+        self.logger.info("Creating 6-DOF Robot with Mesh Pedestal...")
+
+        # Load the plane
+        plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
+        self.logger.info(f"Plane loaded with ID: {plane_id}")
+
+        # 1) World box
+        world_box_half_extents = [dim / 2 for dim in self.world_box_config["dimensions"]]
+        world_box_collision_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=world_box_half_extents)
+        world_box_visual_shape    = p.createVisualShape(
+            p.GEOM_BOX, halfExtents=world_box_half_extents, rgbaColor=self.robot_visual_config["world_box_color"]
+        )
+        world_box_position = [0, 0, world_box_half_extents[2]]
+
+        # 2) Mesh Pedestal
+        mesh_path = self.pedestal_config["mesh"]["path"]
+        mesh_scale = self.pedestal_config["mesh"]["scaling"]
+        
+        # Use GEOM_FORCE_CONCAVE_TRIMESH flag to ensure actual mesh geometry
+        # is used for collision instead of a simplified bounding box
+        pedestal_collision_shape = p.createCollisionShape(
+            p.GEOM_MESH,
+            fileName=mesh_path,
+            meshScale=mesh_scale,
+            flags=p.GEOM_FORCE_CONCAVE_TRIMESH,
+            physicsClientId=self.client_id
+        )
+        pedestal_visual_shape = p.createVisualShape(
+            p.GEOM_MESH,
+            fileName=mesh_path,
+            meshScale=mesh_scale,
+            rgbaColor=self.robot_visual_config["pedestal_color"],
+            physicsClientId=self.client_id
+        )
+
+        link3_position_z = self.pedestal_config["absolute_height"] - world_box_half_extents[2]
+
+        num_links = 4
+        link_masses = [0.0, 0.0, 0.0, self.pedestal_config["mesh"]["mass"]]
+        link_collision_shapes = [-1, -1, -1, pedestal_collision_shape]
+        link_visual_shapes    = [-1, -1, -1, pedestal_visual_shape]
+
+        link_positions = [
+            [0, 0, 0],   # Link0: Base (non-mass) to first prismatic joint (prismatic_x), to world box
+            [0, 0, 0],   # Link1: First (non-mass) to second prismatic joint (prismatic_y), to Link0
+            [0, 0, 0],   # Link2: Second (non-mass) to third prismatic joint (prismatic_z), to Link1
+            [0, 0, link3_position_z]  # Link3: Mesh Pedestal to spherical joint, to Link2
+        ]
+
+        link_orientations = [[0, 0, 0, 1]] * num_links
+        link_inertial_positions    = [[0, 0, 0]] * num_links
+        link_inertial_orientations = [[0, 0, 0, 1]] * num_links
+        link_parent_indices = [0, 1, 2, 3]
+        link_joint_types = [p.JOINT_PRISMATIC, p.JOINT_PRISMATIC, p.JOINT_PRISMATIC, p.JOINT_SPHERICAL]
+        link_joint_axes  = [
+            [1, 0, 0],  # Corrected axis for prismatic_x
+            [0, 1, 0],  # Corrected axis for prismatic_y
+            [0, 0, 1],  # Corrected axis for prismatic_z
+            [0, 0, 0]   # No fixed axis for spherical_joint
+        ]
+
+        self.robot_id = p.createMultiBody(
+            baseMass=0.0,
+            baseCollisionShapeIndex=world_box_collision_shape,
+            baseVisualShapeIndex=world_box_visual_shape,
+            basePosition=world_box_position,
+            linkMasses=link_masses,
+            linkCollisionShapeIndices=link_collision_shapes,
+            linkVisualShapeIndices=link_visual_shapes,
+            linkPositions=link_positions,
+            linkOrientations=link_orientations,
+            linkInertialFramePositions=link_inertial_positions,
+            linkInertialFrameOrientations=link_inertial_orientations,
+            linkParentIndices=link_parent_indices,
+            linkJointTypes=link_joint_types,
+            linkJointAxis=link_joint_axes
+        )
+
+        if self.robot_id < 0:
+            raise RuntimeError("Failed to create robot!")
+
+        self.logger.info(f"Robot created with ID: {self.robot_id}")
+
+        # Set camera view
+        p.resetDebugVisualizerCamera(
+            cameraDistance=20,
+            cameraYaw=0,
+            cameraPitch=-30,
+            cameraTargetPosition=[0, 0, 0]
+        )
+
+        # Enable collisions
+        p.setCollisionFilterPair(self.robot_id, self.robot_id, -1, 3, enableCollision=1)
+
+        # Apply custom dynamics from YAML
+        self.apply_physics_properties()
+        
+        # Set joint limits and maximum efforts
+        self.set_joint_limits_and_efforts()
+        
+        self.logger.info("Mesh pedestal and dynamics applied.")
 
     def apply_physics_properties(self):
         self.logger.info("Applying Physics Properties...")
+        
+        # Determine pedestal inertia based on type
+        if self.pedestal_type == "mesh":
+            pedestal_inertia = self.pedestal_config["mesh"]["inertia"]
+        else:
+            pedestal_inertia = self.pedestal_config["box"]["inertia"]
         
         # World Box
         p.changeDynamics(
@@ -213,7 +334,7 @@ class SimulationCore:
                 spinningFriction=self.dynamics_config["pedestal"]["spinningFriction"],
                 contactDamping=self.dynamics_config["pedestal"]["contactDamping"],
                 contactStiffness=self.dynamics_config["pedestal"]["contactStiffness"],
-                localInertiaDiagonal=self.pedestal_config["inertia"],
+                localInertiaDiagonal=pedestal_inertia,
                 physicsClientId=self.client_id
             )
             
@@ -239,8 +360,14 @@ class SimulationCore:
         Returns:
             dict: Maximum efforts for each joint type
         """
-        pedestal_mass = self.pedestal_config["mass"]
-        pedestal_inertia = self.pedestal_config["inertia"]  # [Ixx, Iyy, Izz]
+        # Get mass and inertia based on pedestal type
+        if self.pedestal_type == "mesh":
+            pedestal_mass = self.pedestal_config["mesh"]["mass"]
+            pedestal_inertia = self.pedestal_config["mesh"]["inertia"]  # [Ixx, Iyy, Izz]
+        else:
+            pedestal_mass = self.pedestal_config["box"]["mass"]
+            pedestal_inertia = self.pedestal_config["box"]["inertia"]  # [Ixx, Iyy, Izz]
+        
         gravity_magnitude = abs(self.gravity[2])  # |g|
         
         # Get maximum accelerations from config

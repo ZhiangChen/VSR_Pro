@@ -4,7 +4,7 @@ simulation_settings:
   GUI_update_frequency: 60  # GUI update frequency in Hz
   enable_graphics: True        # Enable PyBullet GUI
   use_real_time: True    # Use real-time simulation
-  log_file: "data/vsr_pro.log"  # Path to log file
+  log_file: "data/logs/vsr_pro.log"  # Path to log file
 
 structure:
   world_box:
@@ -13,10 +13,21 @@ structure:
     inertia: [0.0, 0.0, 0.0]        # No inertia for static body
 
   pedestal:
+    type: "box"  # Options: "box" or "mesh"
     absolute_height: 6.0     # Height from ground to center of pedestal
-    dimensions: [10.0, 10.0, 0.5]  # Width, Length, Height
-    mass: 2000000.0                 # Heavy pedestal for stability
-    inertia: [1668333333.3, 1668333333.3, 3333333333.3]  # Inertia values
+    
+    # Box pedestal configuration
+    box:
+      dimensions: [10.0, 10.0, 0.5]  # Width, Length, Height
+      mass: 2000000.0                 # Heavy pedestal for stability
+      inertia: [1668333333.3, 1668333333.3, 3333333333.3]  # Inertia values
+    
+    # Mesh pedestal configuration
+    mesh:
+      path: "data/rough_terrain.obj"  # Path to mesh file
+      scaling: [1.0, 1.0, 1.0]        # Scaling factor [x, y, z]
+      mass: 2000000.0                 # Heavy pedestal for stability
+      inertia: [1668333333.3, 1668333333.3, 3333333333.3]  # Inertia values
 
 dynamics:
   world_box:

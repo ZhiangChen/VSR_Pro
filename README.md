@@ -9,7 +9,8 @@ VSR Pro provides a complete simulation environment for a 6-degree-of-freedom (6-
 ### Key Features
 
 - **6-DOF Shake Table Simulation**: Simulates translational (X, Y, Z) and rotational (Roll, Pitch, Yaw) movements
-- **Real-time Physics**: Powered by PyBullet physics engine with 500 Hz simulation frequency
+- **Dual Pedestal Options**: Choose between box pedestal (default) or mesh pedestal for terrain simulation
+- **Real-time Physics**: Powered by PyBullet physics engine with customizable simulation frequency
 - **Interactive GUI**: PyQt5-based interface for real-time control and visualization with pause/resume capability
 - **Dual Trajectory Modes**: 
   - Pulse trajectory: Customizable sine/cosine wave patterns with independent amplitude and frequency control
@@ -45,9 +46,9 @@ VSR_Pro/
 ### File Descriptions
 
 - **`GUI.py`**: Main application entry point with PyQt5 interface including trajectory controls, object loading dialogs, and real-time visualization
-- **`simulation_core.py`**: Core simulation engine managing PyBullet physics, robot creation, joint control (velocity and position), and object spawning
-- **`config.yaml`**: Configuration file defining simulation settings (frequency, gravity, real-time mode), structural parameters, dynamics properties, joint limits, and visual appearance
-- **`data/`**: Directory for storing recorded trajectory data (NPZ format), simulation logs (UTF-8 encoded), and displacement trajectory CSV files
+- **`simulation_core.py`**: Core simulation engine managing PyBullet physics, robot creation (box or mesh pedestal), joint control (velocity and position), and object spawning
+- **`config.yaml`**: Configuration file defining simulation settings (frequency, gravity, real-time mode), structural parameters (including pedestal type selection), dynamics properties, joint limits, and visual appearance
+- **`data/`**: Directory for storing recorded trajectory data (NPZ format), simulation logs (UTF-8 encoded), displacement trajectory CSV files, and mesh files (e.g., rough_terrain.obj)
 - **`docs/`**: Documentation and troubleshooting guides
 - **`utils/`**: Utility scripts for trajectory generation and data analysis
 
@@ -69,8 +70,6 @@ VSR_Pro/
 2. **Create a virtual environment (recommended):**
    ```bash
    python3 -m venv vsr_env
-   source vsr_env/bin/activate  # On macOS/Linux
-   # or
    vsr_env\Scripts\activate     # On Windows
    ```
 
@@ -117,7 +116,7 @@ Configure sinusoidal motion for each DOF independently:
 #### Displacement Trajectory Control
 Execute pre-recorded displacement trajectories from CSV files:
 - **Browse**: Select CSV file containing displacement trajectory
-- **File Validation**: Automatic validation of sampling frequency (must be 500 Hz) and DOF columns
+- **File Validation**: Automatic validation of sampling frequency (must be the same as simulation frequency) and DOF columns
 - **Execute Displacement Trajectory**: Start/stop trajectory execution using position control
 
 CSV Format Requirements:
@@ -128,7 +127,7 @@ time_s,X_m,Y_m,Z_m,Roll_rad,Pitch_rad,Yaw_rad
 ...
 ```
 - `time_s` column is mandatory
-- Sampling must be 500 Hz (0.002s intervals)
+- Sampling must be constant (e.g., 500 Hz, 0.002s intervals)
 - Missing DOF columns are filled with zeros
 - At least one DOF column required
 
@@ -187,7 +186,6 @@ CSV_PATH = "../data/displacement_trajectory.csv"
 
 **Outputs:**
 - CSV file: `displacement_trajectory.csv` (for GUI execution)
-- NPZ file: `displacement_trajectory.npz` (full data with velocity and acceleration)
 - Plots: Two 3x3 figures showing position and orientation trajectories
 
 **Features:**
@@ -232,6 +230,9 @@ Modify `config.yaml` to customize:
 
 - **Simulation Settings**: Frequency (500 Hz), gravity, GUI enable/disable, real-time mode, log file path
 - **Structural Parameters**: Dimensions and mass properties of shake table components (world box, pedestal)
+  - **Pedestal Type Selection**: Choose between "box" (simple geometry) or "mesh" (terrain model)
+  - **Box Pedestal**: Configurable dimensions, mass, and inertia
+  - **Mesh Pedestal**: OBJ file path, scaling factors, mass, and inertia
 - **Joint Configuration**: Movement limits, maximum accelerations, maximum efforts (force/torque)
 - **Dynamics Properties**: Friction (lateral, rolling, spinning), restitution, contact damping/stiffness
 - **Visual Settings**: Colors (RGBA) for world box and pedestal
@@ -270,6 +271,29 @@ simulation_settings:
   GUI_update_frequency: 60            # GUI display update rate in Hz
   enable_graphics: True
   use_real_time: False                # false = fast mode, true = real-time mode
+
+structure:
+  world_box:
+    dimensions: [50.0, 14.0, 2.0]     # Width, Length, Height
+    mass: 0.0                          # Static base
+  
+  pedestal:
+    type: "box"                        # Options: "box" or "mesh"
+    absolute_height: 6.0               # Height from ground to center
+    
+    # Box pedestal configuration
+    box:
+      dimensions: [10.0, 10.0, 0.5]   # Width, Length, Height
+      mass: 2000000.0
+      inertia: [1668333333.3, 1668333333.3, 3333333333.3]
+    
+    # Mesh pedestal configuration (used when type="mesh")
+    mesh:
+      path: "data/rough_terrain.obj"  # Path to OBJ mesh file
+      scaling: [1.0, 1.0, 1.0]        # Scale factors [x, y, z]
+      mass: 2000000.0
+      inertia: [1668333333.3, 1668333333.3, 3333333333.3]
+````
   log_file: "data/simulation.log"    # Log file path
 
 structure:
@@ -419,31 +443,10 @@ The system follows a modular architecture with clear separation of concerns:
 - **Control Strategies**: Implement new control algorithms (e.g., adaptive control, MPC)
 
 
-## Troubleshooting
-
-### Common Issues
-
-**Issue**: Displacement trajectory CSV file rejected with frequency mismatch error
-**Solution**: Ensure CSV is sampled at exactly 500 Hz (0.002s time steps). Use `random_disp_traj.py` to generate compatible files or resample your data to 500 Hz.
-
-**Issue**: Cannot execute displacement trajectory while pulse trajectory is running
-**Solution**: This is by design (mutual exclusion). Stop the pulse trajectory first, then execute displacement trajectory.
-
-**Issue**: Pedestal position jumps to origin when simulation starts
-**Solution**: System now reads initial position on startup. If issue persists, check that `hold_pedestal_position()` is being called correctly when trajectories are not active.
-
-**Issue**: GUI freezes during trajectory execution
-**Solution**: GUI updates are on main thread, simulation on separate thread. If freeze occurs, check for blocking operations in GUI thread. Reduce `GUI_update_frequency` in config if needed.
-
-**Issue**: Object falls through pedestal
-**Solution**: Collision is explicitly enabled between objects and pedestal (link 3). Check mass and contact properties in object physics settings.
-
-**Issue**: Log file has encoding errors
-**Solution**: All logging uses UTF-8 encoding. Ensure your text editor supports UTF-8 when viewing `data/simulation.log`.
 
 ### Performance Notes
 
-- **Non-real-time mode**: Runs 50-60x faster than real-time, suitable for batch processing
+- **Non-real-time mode**: Runs much faster than real-time, suitable for batch processing
 - **Real-time mode**: 1:1 wall clock synchronization, suitable for visualization and hardware-in-loop
 - **Recording overhead**: Minimal performance impact, data recorded at trajectory frequency
 - **GUI updates**: 60 Hz default, can be reduced in config for slower systems
@@ -471,3 +474,8 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 
 
+## Todo
+- create APIs for python pipeline
+- automate PBR load using config file
+- grid cosine pipeline
+- ground motion batch pipeline

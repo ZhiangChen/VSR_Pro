@@ -370,7 +370,16 @@ class PyBulletGUI(QWidget):
 
         self.use_real_time = self.config["simulation_settings"]["use_real_time"]
 
-        self.pedestal_half_z = self.config["structure"]["pedestal"]["dimensions"][2] / 2.0
+        # Get pedestal half height based on type
+        pedestal_config = self.config["structure"]["pedestal"]
+        pedestal_type = pedestal_config.get("type", "box")
+        if pedestal_type == "box":
+            self.pedestal_half_z = pedestal_config["box"]["dimensions"][2] / 2.0
+        else:
+            # For mesh pedestal, use a default value or estimate
+            # This is used for initial object placement above the pedestal
+            self.pedestal_half_z = 0.25  # Default estimate for mesh height
+        
         self.simulation_frequency = self.config["simulation_settings"].get("simulation_frequency", 500)
         self.simulation_dt = 1.0 / self.simulation_frequency
 
@@ -817,7 +826,7 @@ class PyBulletGUI(QWidget):
         """Save recorded data to NPZ file with timestamp."""
         try:
             # Create data directory if it doesn't exist
-            data_dir = "data"
+            data_dir = "data/logs"
             if not os.path.exists(data_dir):
                 os.makedirs(data_dir)
             
