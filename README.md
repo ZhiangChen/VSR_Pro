@@ -34,7 +34,6 @@ VSR_Pro/
 ├── LICENSE                     # Apache License 2.0
 ├── README.md                   # This file
 ├── GUI.py                      # Original GUI application (legacy)
-├── GUI_test.py                 # Refactored GUI using app.py API
 ├── app.py                      # Application API layer for programmatic control
 ├── simulation_core.py          # Core simulation engine
 ├── example_automation.py       # Example automation script using app.py
@@ -56,8 +55,7 @@ VSR_Pro/
 
 ### File Descriptions
 
-- **`GUI.py`**: Original GUI application (legacy version, will be deprecated)
-- **`GUI_test.py`**: Refactored GUI using the new API architecture - cleaner, more maintainable code
+- **`GUI.py`**: Original GUI application 
 - **`app.py`**: Application API layer (`VSRProApp` class) providing programmatic access to simulation control, trajectory execution, object loading, and data recording. Can be used by GUI or Python scripts
 - **`example_automation.py`**: Example script demonstrating how to use `app.py` for automation, batch processing, and headless simulation
 - **`simulation_core.py`**: Core simulation engine managing PyBullet physics, robot creation (box or mesh pedestal), joint control (velocity and position), and object spawning
@@ -110,11 +108,7 @@ VSR_Pro/
 #### Option 1: GUI Interface (Recommended for Interactive Use)
 
 Start the new API-based GUI:
-```bash
-python GUI_test.py
-```
 
-Or use the legacy GUI:
 ```bash
 python GUI.py
 ```
